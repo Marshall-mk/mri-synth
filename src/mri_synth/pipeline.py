@@ -347,6 +347,14 @@ class HRLRDataGenerator:
         # STEP 1: Normalize HR
         hr_augmented = self._normalize_image(hr_images)
 
+        # Compute HR normalization stats for consistent LR normalization
+        hr_norm_stats = []
+        for b in range(batch_size):
+            hr_b = hr_augmented[b]
+            low = torch.quantile(hr_b, 0.005)
+            high = torch.quantile(hr_b, 0.995)
+            hr_norm_stats.append((low, high))
+
         # STEP 2: Create N orthogonal LR stacks
         resolutions, thicknesses = self._create_orthogonal_resolutions(
             batch_size, device
@@ -422,7 +430,7 @@ class HRLRDataGenerator:
                     aliasing_axis=aliasing_axis,
                 )
 
-            # Normalize LR to [0, 1]
+            # Normalize LR to [0, 1] using HR normalization stats
             if self.clip_to_unit_range:
                 if self.return_intermediate:
                     lr_norm = []
@@ -431,24 +439,15 @@ class HRLRDataGenerator:
                         lr_b = lr_images[b : b + 1]
                         true_lr_b = true_lr_images[b : b + 1]
 
-                        low = torch.quantile(lr_b, 0.005)
-                        high = torch.quantile(lr_b, 0.995)
-                        true_low = torch.quantile(true_lr_b, 0.005)
-                        true_high = torch.quantile(true_lr_b, 0.995)
+                        low, high = hr_norm_stats[b]
 
                         lr_b = torch.clamp(lr_b, low, high)
-                        true_lr_b = torch.clamp(true_lr_b, true_low, true_high)
+                        true_lr_b = torch.clamp(true_lr_b, low, high)
 
-                        min_val = lr_b.min()
-                        max_val = lr_b.max()
-                        lr_b = (lr_b - min_val) / (max_val - min_val + 1e-8)
+                        lr_b = (lr_b - low) / (high - low + 1e-8)
                         lr_norm.append(lr_b)
 
-                        min_val_true = true_lr_b.min()
-                        max_val_true = true_lr_b.max()
-                        true_lr_b = (true_lr_b - min_val_true) / (
-                            max_val_true - min_val_true + 1e-8
-                        )
+                        true_lr_b = (true_lr_b - low) / (high - low + 1e-8)
                         true_lr_norm.append(true_lr_b)
 
                     lr_images = torch.cat(lr_norm, dim=0)
@@ -460,13 +459,9 @@ class HRLRDataGenerator:
                     for b in range(batch_size):
                         lr_b = lr_images[b : b + 1]
 
-                        low = torch.quantile(lr_b, 0.005)
-                        high = torch.quantile(lr_b, 0.995)
+                        low, high = hr_norm_stats[b]
                         lr_b = torch.clamp(lr_b, low, high)
-
-                        min_val = lr_b.min()
-                        max_val = lr_b.max()
-                        lr_b = (lr_b - min_val) / (max_val - min_val + 1e-8)
+                        lr_b = (lr_b - low) / (high - low + 1e-8)
                         lr_norm.append(lr_b)
 
                     lr_images = torch.cat(lr_norm, dim=0)
