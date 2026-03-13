@@ -181,11 +181,11 @@ For distributed training, call `set_epoch(epoch)` on each rank to keep schedules
 | `min_resolution` | `[1, 1, 1]` | Minimum in-plane resolution (mm) |
 | `max_res_aniso` | `[9, 9, 9]` | Maximum through-plane resolution (mm) |
 | `randomise_res` | `true` | Randomize acquisition resolution |
-| `apply_intensity_aug` | `true` | Apply gamma/intensity augmentation |
+| `apply_intensity_aug` | `false` | Apply gamma/intensity augmentation |
 | `clip_to_unit_range` | `true` | Clip outputs to [0, 1] |
 | `upsample_mode` | `trilinear` | Interpolation mode for upsampling |
-| `preserve_input_shape` | `false` | Upsample LR back to input shape |
-| `return_intermediate` | `true` | Return native-resolution LR (pre-upsample) |
+| `preserve_input_shape` | `true` | Upsample LR back to input shape |
+| `return_intermediate` | `false` | Return native-resolution LR (pre-upsample) |
 | `save_native_res` | `false` | Save native-res stacks to disk (CLI) |
 | `orientation_dropout_prob` | `0.0` | Probability of dropping orientations |
 | `min_orientations` | `1` | Minimum orientations to keep after dropout |
@@ -222,7 +222,7 @@ For distributed training, call `set_epoch(epoch)` on each rank to keep schedules
 | `prob` | `0.7` | Probability of FOV cropping per stack |
 | `min_keep` | `0.40` | Minimum fraction of slices to keep |
 | `max_keep` | `0.70` | Maximum fraction of slices to keep |
-| `ensure_coverage` | `false` | Ensure complementary FOV coverage across stacks |
+| `ensure_coverage` | `true` | Ensure complementary FOV coverage across stacks |
 | `force_both_sides` | `true` | Drop slices from both ends |
 
 ### Loading and saving configs

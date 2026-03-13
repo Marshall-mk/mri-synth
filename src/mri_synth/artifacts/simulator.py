@@ -56,8 +56,8 @@ class MRIArtifactSimulator(nn.Module):
         motion_intensity: float = 1.5,
         spike_intensity: float = 0.04,
         upsample_mode: str = "trilinear",
-        preserve_input_shape: bool = False,
-        return_intermediate: bool = True,
+        preserve_input_shape: bool = True,
+        return_intermediate: bool = False,
         psf_profile_type: str = "trapezoid",
         psf_edge_width: float = 0.1,
     ):

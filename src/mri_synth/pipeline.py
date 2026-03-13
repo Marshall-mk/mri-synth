@@ -68,7 +68,7 @@ class HRLRDataGenerator:
         max_res_aniso: list = None,
         randomise_res: bool = True,
         # Toggles
-        apply_intensity_aug: bool = True,
+        apply_intensity_aug: bool = False,
         clip_to_unit_range: bool = True,
         # Orientation dropout
         orientation_dropout_prob: float = 0.0,
@@ -76,16 +76,16 @@ class HRLRDataGenerator:
         drop_orientations: list = None,
         # Interpolation mode
         upsample_mode: str = "trilinear",
-        preserve_input_shape: bool = False,
+        preserve_input_shape: bool = True,
         # LR stack saving
-        return_intermediate: bool = True,
+        return_intermediate: bool = False,
         # PSF configuration
         psf_profile_type: str = "trapezoid",
         psf_edge_width: float = 0.1,
         # FOV configuration
         fov_min_keep: float = 0.40,
         fov_max_keep: float = 0.70,
-        fov_ensure_coverage: bool = False,
+        fov_ensure_coverage: bool = True,
         fov_force_both_sides: bool = True,
     ):
         if atlas_res is None:

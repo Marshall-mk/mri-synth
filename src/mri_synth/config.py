@@ -34,7 +34,7 @@ class FOVConfig(BaseModel):
     prob: float = 0.7
     min_keep: float = 0.40
     max_keep: float = 0.70
-    ensure_coverage: bool = False
+    ensure_coverage: bool = True
     force_both_sides: bool = True
 
 
@@ -48,11 +48,11 @@ class GenerationConfig(BaseModel):
     min_resolution: List[float] = Field(default_factory=lambda: [1.0, 1.0, 1.0])
     max_res_aniso: List[float] = Field(default_factory=lambda: [9.0, 9.0, 9.0])
     randomise_res: bool = True
-    apply_intensity_aug: bool = True
+    apply_intensity_aug: bool = False
     clip_to_unit_range: bool = True
     upsample_mode: str = "trilinear"
-    preserve_input_shape: bool = False
-    return_intermediate: bool = True
+    preserve_input_shape: bool = True
+    return_intermediate: bool = False
     save_native_res: bool = False
     orientation_dropout_prob: float = 0.0
     min_orientations: int = 1
