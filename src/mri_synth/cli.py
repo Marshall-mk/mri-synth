@@ -44,6 +44,12 @@ def generate(
     device: str = typer.Option("cpu", "--device", help="Device: cpu or cuda"),
     seed: Optional[int] = typer.Option(None, "--seed", help="Random seed"),
     save_native_res: bool = typer.Option(False, "--save-native-res/--no-save-native-res", help="Save native-resolution LR stacks (pre-upsample)"),
+    clip_to_unit_range: bool = typer.Option(True, "--clip-to-unit-range/--no-clip-to-unit-range", help="Clip outputs to [0, 1]"),
+    preserve_input_shape: bool = typer.Option(True, "--preserve-input-shape/--no-preserve-input-shape", help="Upsample LR back to input shape"),
+    apply_intensity_aug: bool = typer.Option(False, "--apply-intensity-aug/--no-intensity-aug", help="Apply intensity augmentation"),
+    randomise_res: bool = typer.Option(True, "--randomise-res/--no-randomise-res", help="Randomize acquisition resolution"),
+    return_intermediate: bool = typer.Option(False, "--return-intermediate/--no-return-intermediate", help="Return native-resolution LR (pre-upsample)"),
+    upsample_mode: str = typer.Option("trilinear", "--upsample-mode", help="Interpolation mode for upsampling"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file (overrides CLI flags)"),
 ):
     """Generate synthetic LR MRI stacks from HR volumes."""
@@ -72,12 +78,22 @@ def generate(
             max_res_aniso=max_res_aniso or [9.0, 9.0, 9.0],
             device=device,
             seed=seed,
+            clip_to_unit_range=clip_to_unit_range,
+            preserve_input_shape=preserve_input_shape,
+            apply_intensity_aug=apply_intensity_aug,
+            randomise_res=randomise_res,
+            return_intermediate=return_intermediate,
+            upsample_mode=upsample_mode,
         )
         cfg.physics.psf_type = psf_type
         cfg.physics.prob_bias_field = 0.5 if enable_bias_field else 0.0
         cfg.artifacts.noise_std = noise_std
         cfg.fov.enable = enable_fov_sim
         cfg.save_native_res = save_native_res
+
+    # --save-native-res requires return_intermediate to generate true LR stacks
+    if cfg.save_native_res and not cfg.return_intermediate:
+        cfg.return_intermediate = True
 
     if cfg.seed is not None:
         torch.manual_seed(cfg.seed)
@@ -133,10 +149,16 @@ def generate(
 
                 if cfg.save_native_res and generator.return_intermediate:
                     native_file = get_native_stack_filename(s_idx)
+                    # Scale affine to reflect actual LR voxel spacing
+                    native_affine = affine.copy()
+                    res = resolutions[s_idx].squeeze(0)  # (3,) acquisition res in mm
+                    for axis in range(3):
+                        scale = res[axis].item() / cfg.atlas_res[axis]
+                        native_affine[:3, axis] *= scale
                     save_volume(
                         true_lr_stacks[s_idx].squeeze(0),
                         var_dir / native_file,
-                        affine,
+                        native_affine,
                     )
                     stack_meta["native_file"] = native_file
 

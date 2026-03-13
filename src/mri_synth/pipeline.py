@@ -471,6 +471,10 @@ class HRLRDataGenerator:
 
                     lr_images = torch.cat(lr_norm, dim=0)
                     lr_stacks.append(lr_images)
+            else:
+                lr_stacks.append(lr_images)
+                if self.return_intermediate:
+                    true_lr_stacks.append(true_lr_images)
 
         hr_augmented = torch.clamp(hr_augmented, 0.0, 1.0)
 

@@ -15,13 +15,13 @@ pip install -e .
 Generate synthetic LR stacks from a single HR volume:
 
 ```bash
-mri-synth generate -i brain.nii.gz -o output/
+mri-synth -i brain.nii.gz -o output/
 ```
 
 Process an entire directory:
 
 ```bash
-mri-synth generate -i /data/hr_volumes/ -o output/ -n 5 --num-stacks 3
+mri-synth -i /data/hr_volumes/ -o output/ -n 5 --num-stacks 3
 ```
 
 ### Output structure
@@ -55,6 +55,12 @@ output/
 | `--min-res` | `1.0 1.0 1.0` | Minimum resolution per axis (3 values) |
 | `--max-res-aniso` | `9.0 9.0 9.0` | Maximum anisotropic resolution (3 values) |
 | `--save-native-res` / `--no-save-native-res` | disabled | Save native-resolution LR stacks (pre-upsample) |
+| `--clip-to-unit-range` / `--no-clip-to-unit-range` | enabled | Clip outputs to [0, 1] |
+| `--preserve-input-shape` / `--no-preserve-input-shape` | enabled | Upsample LR back to input shape |
+| `--apply-intensity-aug` / `--no-intensity-aug` | disabled | Apply intensity augmentation |
+| `--randomise-res` / `--no-randomise-res` | enabled | Randomize acquisition resolution |
+| `--return-intermediate` / `--no-return-intermediate` | disabled | Return native-resolution LR (pre-upsample) |
+| `--upsample-mode` | `trilinear` | Interpolation mode for upsampling |
 | `--device` | `cpu` | Device: `cpu` or `cuda` |
 | `--seed` | `None` | Random seed for reproducibility |
 | `--config`, `-c` | `None` | YAML config file (overrides CLI flags) |
@@ -82,7 +88,7 @@ fov:
 ```
 
 ```bash
-mri-synth generate -i /data/hr_volumes/ -o output/ --config config.yaml
+mri-synth -i /data/hr_volumes/ -o output/ --config config.yaml
 ```
 
 ## Quick Start — Training (Python API)
