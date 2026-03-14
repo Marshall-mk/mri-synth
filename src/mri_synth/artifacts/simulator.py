@@ -199,7 +199,8 @@ class MRIArtifactSimulator(nn.Module):
                     cropped_fft = fft_volume[:, :, :, crop_start:crop_end]
 
                 cropped_fft = torch.fft.ifftshift(cropped_fft, dim=(1, 2, 3))
-                img = torch.real(torch.fft.ifftn(cropped_fft, dim=(1, 2, 3)))
+                scale_factor = new_size / original_shape[spatial_axis]
+                img = torch.real(torch.fft.ifftn(cropped_fft, dim=(1, 2, 3))) * scale_factor
 
                 if self.return_intermediate:
                     true_lr_img = img.clone()
