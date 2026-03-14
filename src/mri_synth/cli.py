@@ -115,9 +115,6 @@ def generate(
 
         dirs = create_output_structure(output_dir, vol_name, cfg.num_variations)
 
-        # Save HR
-        save_volume(tensor.squeeze(0), dirs["volume_dir"] / "hr.nii.gz", affine)
-
         vol_manifest = {"name": vol_name, "variations": []}
 
         for var_idx in range(cfg.num_variations):
@@ -131,6 +128,10 @@ def generate(
                 lr_stacks, true_lr_stacks, hr_aug, resolutions, thicknesses, orient_mask, spatial_masks = result
             else:
                 lr_stacks, hr_aug, resolutions, thicknesses, orient_mask, spatial_masks = result
+
+            # Save normalized HR (once — identical across variations)
+            if var_idx == 0:
+                save_volume(hr_aug.squeeze(0), dirs["volume_dir"] / "hr.nii.gz", affine)
 
             var_meta = {"stacks": []}
             for s_idx in range(cfg.num_stacks):
