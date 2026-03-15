@@ -347,14 +347,6 @@ class HRLRDataGenerator:
         # STEP 1: Normalize HR
         hr_augmented = self._normalize_image(hr_images)
 
-        # Compute HR normalization stats for consistent LR normalization
-        hr_norm_stats = []
-        for b in range(batch_size):
-            hr_b = hr_augmented[b]
-            low = torch.quantile(hr_b, 0.005)
-            high = torch.quantile(hr_b, 0.995)
-            hr_norm_stats.append((low, high))
-
         # STEP 2: Create N orthogonal LR stacks
         resolutions, thicknesses = self._create_orthogonal_resolutions(
             batch_size, device
@@ -430,46 +422,15 @@ class HRLRDataGenerator:
                     aliasing_axis=aliasing_axis,
                 )
 
-            # Normalize LR to [0, 1] using HR normalization stats
+            # Normalize LR to [0, 1] — match HR's simple clamp
             if self.clip_to_unit_range:
+                lr_images = torch.clamp(lr_images, 0.0, 1.0)
                 if self.return_intermediate:
-                    lr_norm = []
-                    true_lr_norm = []
-                    for b in range(batch_size):
-                        lr_b = lr_images[b : b + 1]
-                        true_lr_b = true_lr_images[b : b + 1]
+                    true_lr_images = torch.clamp(true_lr_images, 0.0, 1.0)
 
-                        low, high = hr_norm_stats[b]
-
-                        lr_b = torch.clamp(lr_b, low, high)
-                        true_lr_b = torch.clamp(true_lr_b, low, high)
-
-                        lr_b = (lr_b - low) / (high - low + 1e-8)
-                        lr_norm.append(lr_b)
-
-                        true_lr_b = (true_lr_b - low) / (high - low + 1e-8)
-                        true_lr_norm.append(true_lr_b)
-
-                    lr_images = torch.cat(lr_norm, dim=0)
-                    lr_stacks.append(lr_images)
-                    true_lr_images = torch.cat(true_lr_norm, dim=0)
-                    true_lr_stacks.append(true_lr_images)
-                else:
-                    lr_norm = []
-                    for b in range(batch_size):
-                        lr_b = lr_images[b : b + 1]
-
-                        low, high = hr_norm_stats[b]
-                        lr_b = torch.clamp(lr_b, low, high)
-                        lr_b = (lr_b - low) / (high - low + 1e-8)
-                        lr_norm.append(lr_b)
-
-                    lr_images = torch.cat(lr_norm, dim=0)
-                    lr_stacks.append(lr_images)
-            else:
-                lr_stacks.append(lr_images)
-                if self.return_intermediate:
-                    true_lr_stacks.append(true_lr_images)
+            lr_stacks.append(lr_images)
+            if self.return_intermediate:
+                true_lr_stacks.append(true_lr_images)
 
         hr_augmented = torch.clamp(hr_augmented, 0.0, 1.0)
 
