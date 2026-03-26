@@ -62,6 +62,7 @@ def generate(
         get_native_stack_filename,
         get_stack_filename,
         load_volume,
+        resample_to_spacing,
         save_volume,
         write_manifest,
         write_metadata,
@@ -112,6 +113,7 @@ def generate(
         typer.echo(f"  [{vol_idx + 1}/{len(input_files)}] {vol_name}")
 
         tensor, affine, header = load_volume(vol_path)
+        tensor, affine = resample_to_spacing(tensor, affine, cfg.atlas_res)
         tensor = tensor.unsqueeze(0).to(cfg.device)  # (1, C, D, H, W)
 
         dirs = create_output_structure(output_dir, vol_name, cfg.num_variations)

@@ -31,6 +31,46 @@ def load_volume(path: Union[str, Path]) -> Tuple[torch.Tensor, np.ndarray, nib.N
     return tensor, nii.affine, nii.header
 
 
+def resample_to_spacing(
+    tensor: torch.Tensor,
+    affine: np.ndarray,
+    target_spacing: List[float],
+) -> Tuple[torch.Tensor, np.ndarray]:
+    """
+    Resample a volume tensor to target voxel spacing.
+
+    Args:
+        tensor: (C, D, H, W) volume tensor.
+        affine: 4x4 NIfTI affine matrix.
+        target_spacing: Target voxel spacing [R, A, S] in mm.
+
+    Returns:
+        Resampled tensor and updated affine.
+    """
+    current_spacing = np.sqrt((affine[:3, :3] ** 2).sum(axis=0))
+
+    if np.allclose(current_spacing, target_spacing, atol=1e-3):
+        return tensor, affine
+
+    scale_factors = current_spacing / np.array(target_spacing)
+    old_shape = np.array(tensor.shape[-3:])
+    new_shape = np.round(old_shape * scale_factors).astype(int)
+
+    resampled = torch.nn.functional.interpolate(
+        tensor.unsqueeze(0).float(),
+        size=tuple(new_shape),
+        mode="trilinear",
+        align_corners=False,
+    ).squeeze(0)
+
+    new_affine = affine.copy()
+    for i in range(3):
+        col_norm = np.sqrt((affine[:3, i] ** 2).sum())
+        new_affine[:3, i] = affine[:3, i] * (target_spacing[i] / col_norm)
+
+    return resampled, new_affine
+
+
 def save_volume(
     tensor: torch.Tensor,
     path: Union[str, Path],
