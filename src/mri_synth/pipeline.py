@@ -238,6 +238,57 @@ class HRLRDataGenerator:
 
         return mask
 
+    def _create_interpolation_masks(
+        self,
+        resolutions: List[torch.Tensor],
+        hr_shape: Tuple[int, int, int],
+        device: torch.device,
+    ) -> List[torch.Tensor]:
+        """
+        Create binary masks indicating interpolated (1) vs acquired (0) slices.
+
+        For each stack, marks which slices on the HR grid were actually acquired
+        vs interpolated during resampling from LR to HR.
+
+        Args:
+            resolutions: num_stacks list of tensors, each (batch_size, 3).
+            hr_shape: Spatial dimensions (D, H, W) of the HR grid.
+            device: Torch device.
+
+        Returns:
+            List of num_stacks tensors, each (batch_size, 1, D, H, W).
+        """
+        through_plane_axes = [2, 1, 0]
+        batch_size = resolutions[0].shape[0]
+        masks = []
+
+        for stack_idx in range(self.num_stacks):
+            tp_axis = through_plane_axes[stack_idx % 3]
+            axis_size = hr_shape[tp_axis]
+            atlas_spacing = self.atlas_res[tp_axis]
+
+            mask = torch.ones(batch_size, 1, *hr_shape, device=device)
+
+            for b in range(batch_size):
+                lr_spacing = resolutions[stack_idx][b, tp_axis].item()
+                factor = lr_spacing / atlas_spacing
+                num_acquired = int(axis_size / factor) + 1
+                acquired_indices = torch.round(
+                    torch.arange(num_acquired, device=device, dtype=torch.float32)
+                    * factor
+                ).long()
+                acquired_indices = acquired_indices[acquired_indices < axis_size]
+
+                if tp_axis == 0:
+                    mask[b, :, acquired_indices, :, :] = 0
+                elif tp_axis == 1:
+                    mask[b, :, :, acquired_indices, :] = 0
+                else:
+                    mask[b, :, :, :, acquired_indices] = 0
+
+            masks.append(mask)
+        return masks
+
     def _create_orthogonal_resolutions(
         self,
         batch_size: int,
@@ -451,6 +502,10 @@ class HRLRDataGenerator:
                 for _ in range(self.num_stacks)
             ]
 
+        interpolation_masks = self._create_interpolation_masks(
+            resolutions, hr_images.shape[-3:], device
+        )
+
         if return_resolution and self.return_intermediate:
             return (
                 lr_stacks,
@@ -460,6 +515,7 @@ class HRLRDataGenerator:
                 thicknesses,
                 orientation_mask,
                 spatial_masks,
+                interpolation_masks,
             )
         elif return_resolution:
             return (
@@ -469,6 +525,7 @@ class HRLRDataGenerator:
                 thicknesses,
                 orientation_mask,
                 spatial_masks,
+                interpolation_masks,
             )
         else:
-            return lr_stacks, hr_augmented, orientation_mask, spatial_masks
+            return lr_stacks, hr_augmented, orientation_mask, spatial_masks, interpolation_masks

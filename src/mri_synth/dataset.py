@@ -119,7 +119,7 @@ class GeneratorDataset(torch.utils.data.Dataset):
         )
 
         if self.return_resolution:
-            lr_stacks, hr_augmented, resolutions, thicknesses, orientation_mask, spatial_masks = result
+            lr_stacks, hr_augmented, resolutions, thicknesses, orientation_mask, spatial_masks, interpolation_masks = result
             if self.balanced_orientation_combos:
                 orientation_mask = self._orientation_combo_schedule[idx]
             return (
@@ -129,9 +129,10 @@ class GeneratorDataset(torch.utils.data.Dataset):
                 [thick.squeeze(0) for thick in thicknesses],
                 orientation_mask.squeeze(0),
                 [mask.squeeze(0) for mask in spatial_masks],
+                [mask.squeeze(0) for mask in interpolation_masks],
             )
         else:
-            lr_stacks, hr_augmented, orientation_mask, spatial_masks = result
+            lr_stacks, hr_augmented, orientation_mask, spatial_masks, interpolation_masks = result
             if self.balanced_orientation_combos:
                 orientation_mask = self._orientation_combo_schedule[idx]
             return (
@@ -139,6 +140,7 @@ class GeneratorDataset(torch.utils.data.Dataset):
                 hr_augmented.squeeze(0),
                 orientation_mask.squeeze(0),
                 [mask.squeeze(0) for mask in spatial_masks],
+                [mask.squeeze(0) for mask in interpolation_masks],
             )
 
 

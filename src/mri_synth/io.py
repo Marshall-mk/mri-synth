@@ -116,6 +116,12 @@ def get_native_stack_filename(stack_idx: int) -> str:
     return f"stack_{stack_idx}_{orient}_native.nii.gz"
 
 
+def get_interp_mask_filename(stack_idx: int) -> str:
+    """Get the filename for an interpolation mask by index."""
+    orient = _ORIENTATION_NAMES[stack_idx % len(_ORIENTATION_NAMES)]
+    return f"stack_{stack_idx}_{orient}_interp_mask.nii.gz"
+
+
 def write_metadata(
     path: Union[str, Path],
     metadata: Dict,

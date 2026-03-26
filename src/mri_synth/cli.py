@@ -58,6 +58,7 @@ def generate(
     from mri_synth.config import GenerationConfig
     from mri_synth.io import (
         create_output_structure,
+        get_interp_mask_filename,
         get_native_stack_filename,
         get_stack_filename,
         load_volume,
@@ -125,9 +126,9 @@ def generate(
             )
 
             if generator.return_intermediate:
-                lr_stacks, true_lr_stacks, hr_aug, resolutions, thicknesses, orient_mask, spatial_masks = result
+                lr_stacks, true_lr_stacks, hr_aug, resolutions, thicknesses, orient_mask, spatial_masks, interpolation_masks = result
             else:
-                lr_stacks, hr_aug, resolutions, thicknesses, orient_mask, spatial_masks = result
+                lr_stacks, hr_aug, resolutions, thicknesses, orient_mask, spatial_masks, interpolation_masks = result
 
             # Save normalized HR (once — identical across variations)
             if var_idx == 0:
@@ -147,6 +148,14 @@ def generate(
                     "resolution": resolutions[s_idx].squeeze(0).tolist(),
                     "thickness": thicknesses[s_idx].squeeze(0).tolist(),
                 }
+
+                interp_mask_file = get_interp_mask_filename(s_idx)
+                save_volume(
+                    interpolation_masks[s_idx].squeeze(0),
+                    var_dir / interp_mask_file,
+                    affine,
+                )
+                stack_meta["interp_mask_file"] = interp_mask_file
 
                 if cfg.save_native_res and generator.return_intermediate:
                     native_file = get_native_stack_filename(s_idx)

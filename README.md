@@ -32,8 +32,11 @@ output/
     hr.nii.gz
     variation_000/
       stack_0_axial.nii.gz
+      stack_0_axial_interp_mask.nii.gz
       stack_1_coronal.nii.gz
+      stack_1_coronal_interp_mask.nii.gz
       stack_2_sagittal.nii.gz
+      stack_2_sagittal_interp_mask.nii.gz
       metadata.json
     variation_001/
       ...
@@ -111,11 +114,12 @@ dataset = create_dataset(
     use_cache=True,
 )
 
-lr_stacks, hr, orientation_mask, spatial_masks = dataset[0]
+lr_stacks, hr, orientation_mask, spatial_masks, interp_masks = dataset[0]
 # lr_stacks: list of N tensors (C, D, H, W)
 # hr: tensor (C, D, H, W)
 # orientation_mask: bool tensor (num_stacks,)
 # spatial_masks: list of N tensors (C, D, H, W)
+# interp_masks: list of N binary tensors (C, D, H, W) — 1=interpolated, 0=acquired
 ```
 
 ### Using `GeneratorDataset` with a MONAI base dataset
@@ -141,7 +145,7 @@ dataset = GeneratorDataset(
     balanced_orientation_combos=True,
 )
 
-lr_stacks, hr, resolutions, thicknesses, orientation_mask, spatial_masks = dataset[0]
+lr_stacks, hr, resolutions, thicknesses, orientation_mask, spatial_masks, interp_masks = dataset[0]
 ```
 
 ### Using `HRLRDataGenerator` directly
@@ -158,7 +162,7 @@ generator = HRLRDataGenerator(
 )
 
 hr_batch = torch.randn(2, 1, 128, 128, 128)  # (B, C, D, H, W)
-lr_stacks, hr_aug, orientation_mask, spatial_masks = generator.generate_paired_data(hr_batch)
+lr_stacks, hr_aug, orientation_mask, spatial_masks, interp_masks = generator.generate_paired_data(hr_batch)
 ```
 
 ### Balanced orientation combos
@@ -256,6 +260,7 @@ The pipeline applies the following steps to each HR volume:
    - Trilinear upsampling back to HR grid
    - Additive Gaussian noise
 5. **FOV simulation** — Drop slices from stack edges with coverage guarantees
+6. **Interpolation mask generation** — Binary mask per stack marking which HR-grid slices are interpolated (1) vs acquired (0)
 
 ## License
 
