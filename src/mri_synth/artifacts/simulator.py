@@ -1,11 +1,18 @@
 """MRI artifact simulation pipeline."""
 
-from typing import List, Optional
+import math
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from mri_synth.fov.resampling import (
+    affine_resample_3d,
+    apply_fov_slice_drop_native,
+    build_lr_affine,
+    resample_with_fov_mask,
+)
 from mri_synth.physics.slice_profile import SliceProfilePhysics
 from mri_synth.artifacts.kspace import (
     apply_kspace_motion_ghosting,
@@ -23,7 +30,9 @@ class MRIArtifactSimulator(nn.Module):
     2. K-space corruptions (motion ghosts, RF spikes)
     3. Aliasing (FOV wrap-around)
     4. Resolution loss (FFT cropping)
-    5. Thermal noise (Rician)
+    5. FOV slice drop on native LR (optional)
+    6. Affine-based resampling to HR grid + FOV mask generation
+    7. Thermal noise (Rician)
 
     Args:
         volume_res: Input HR volume resolution in mm.
@@ -41,6 +50,9 @@ class MRIArtifactSimulator(nn.Module):
         return_intermediate: If True, also return true LR before upsample.
         psf_profile_type: Slice profile type ('trapezoid', 'gaussian', 'boxcar').
         psf_edge_width: Edge width for trapezoid profile.
+        obliqueness_range: Maximum rotation per axis in degrees.
+        enable_obliqueness: If True, apply random oblique rotations.
+        prob_obliqueness: Probability of applying obliqueness per stack.
     """
 
     def __init__(
@@ -60,6 +72,9 @@ class MRIArtifactSimulator(nn.Module):
         return_intermediate: bool = False,
         psf_profile_type: str = "trapezoid",
         psf_edge_width: float = 0.1,
+        obliqueness_range: float = 15.0,
+        enable_obliqueness: bool = True,
+        prob_obliqueness: float = 0.5,
     ):
         super().__init__()
         self.volume_res = torch.tensor(volume_res, dtype=torch.float32)
@@ -75,6 +90,9 @@ class MRIArtifactSimulator(nn.Module):
         self.upsample_mode = upsample_mode
         self.preserve_input_shape = preserve_input_shape
         self.return_intermediate = return_intermediate
+        self.obliqueness_range = obliqueness_range
+        self.enable_obliqueness = enable_obliqueness
+        self.prob_obliqueness = prob_obliqueness
         self.physics_engine = SliceProfilePhysics(
             profile_type=psf_profile_type, edge_width=psf_edge_width
         )
@@ -90,9 +108,12 @@ class MRIArtifactSimulator(nn.Module):
         enable_noise: Optional[torch.Tensor] = None,
         motion_axis: Optional[torch.Tensor] = None,
         aliasing_axis: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        fov_drop_decisions: Optional[torch.Tensor] = None,
+        fov_keep_fractions: Optional[torch.Tensor] = None,
+        fov_force_both_sides: bool = True,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Apply MRI artifact simulation.
+        Apply MRI artifact simulation with affine-based resampling.
 
         Args:
             image: Input volume (B, C, D, H, W).
@@ -104,15 +125,23 @@ class MRIArtifactSimulator(nn.Module):
             enable_noise: Pre-sampled bool mask (B,).
             motion_axis: Pre-sampled axis (B,).
             aliasing_axis: Pre-sampled axis (B,).
+            fov_drop_decisions: Per-batch bool (B,) — True to apply FOV drop.
+            fov_keep_fractions: Per-batch float (B,) — fraction of slices to keep.
+            fov_force_both_sides: Drop from both ends of the through-plane axis.
 
         Returns:
-            Simulated LR volume, or tuple of (upsampled, true_lr) if
-            return_intermediate is True.
+            If return_intermediate is False:
+                Tuple of (simulated_lr, fov_masks) each (B, C, D, H, W).
+            If return_intermediate is True:
+                Tuple of (simulated_lr, fov_masks, true_lr_stacks) where
+                true_lr_stacks is (B, C, D', H', W') before resampling.
         """
         batch_size = image.shape[0]
         device = image.device
         outputs = []
+        fov_mask_outputs = []
         true_lr_outputs = [] if self.return_intermediate else None
+        self._last_rotation_angles = []
 
         for b in range(batch_size):
             img = image[b]  # (C, D, H, W)
@@ -178,7 +207,6 @@ class MRIArtifactSimulator(nn.Module):
             downsample_axis = torch.argmax(factors).item()
             factor = factors[downsample_axis].item()
 
-            true_lr_img = None
             if factor > 1.1:
                 original_shape = img.shape
                 spatial_axis = downsample_axis + 1
@@ -202,32 +230,115 @@ class MRIArtifactSimulator(nn.Module):
                 scale_factor = new_size / original_shape[spatial_axis]
                 img = torch.real(torch.fft.ifftn(cropped_fft, dim=(1, 2, 3))) * scale_factor
 
-                if self.return_intermediate:
-                    true_lr_img = img.clone()
+                # STEP 5: FOV slice drop on native LR
+                fov_drop_applied = (
+                    fov_drop_decisions is not None
+                    and fov_drop_decisions[b].item()
+                    and fov_keep_fractions is not None
+                )
+                if fov_drop_applied:
+                    keep_frac = fov_keep_fractions[b].item()
+                    img = apply_fov_slice_drop_native(
+                        img,
+                        through_plane_axis=downsample_axis,
+                        keep_fraction=keep_frac,
+                        force_both_sides=fov_force_both_sides,
+                    )
 
-                if self.preserve_input_shape:
-                    target_shape = original_input_shape
-                elif self.output_shape is not None:
-                    target_shape = self.output_shape
-                else:
-                    target_shape = None
+                # STEP 6: Affine-based resampling to HR grid + FOV mask
+                target_shape = original_input_shape
+                if self.output_shape is not None:
+                    target_shape = tuple(self.output_shape)
 
-                if target_shape is not None and list(img.shape[1:]) != list(
-                    target_shape
+                # Build HR affine (diagonal with volume_res)
+                vol_res = self.volume_res.to(device)
+                hr_affine = torch.diag(
+                    torch.tensor(
+                        [vol_res[0], vol_res[1], vol_res[2], 1.0],
+                        device=device,
+                    )
+                )
+
+                lr_native_shape = tuple(img.shape[1:])
+                resample_mode = self.upsample_mode if self.upsample_mode != "trilinear" else "bilinear"
+
+                # Sample obliqueness rotation angles (applied randomly per stack)
+                rotation_angles = None
+                if (
+                    self.enable_obliqueness
+                    and self.obliqueness_range > 0
+                    and torch.rand(1).item() < self.prob_obliqueness
                 ):
-                    img = F.interpolate(
-                        img.unsqueeze(0),
-                        size=target_shape,
-                        mode=self.upsample_mode,
-                    ).squeeze(0)
+                    max_rad = self.obliqueness_range * math.pi / 180.0
+                    rx = torch.empty(1, device=device).uniform_(-max_rad, max_rad).item()
+                    ry = torch.empty(1, device=device).uniform_(-max_rad, max_rad).item()
+                    rz = torch.empty(1, device=device).uniform_(-max_rad, max_rad).item()
+                    rotation_angles = (rx, ry, rz)
 
-            if self.return_intermediate:
-                if true_lr_img is not None:
-                    true_lr_outputs.append(true_lr_img.unsqueeze(0))
+                self._last_rotation_angles.append(rotation_angles)
+
+                # Build axis-aligned LR affine (no rotation)
+                lr_affine_aligned = build_lr_affine(
+                    hr_affine=hr_affine,
+                    through_plane_axis=downsample_axis,
+                    lr_spacing_tp=acq_res[downsample_axis].item(),
+                    hr_spacing_tp=vol_res[downsample_axis].item(),
+                    lr_shape=lr_native_shape,
+                    hr_shape=tuple(target_shape),
+                    rotation_angles=None,
+                )
+
+                if rotation_angles is not None:
+                    # Build oblique LR affine (with rotation)
+                    lr_affine_oblique = build_lr_affine(
+                        hr_affine=hr_affine,
+                        through_plane_axis=downsample_axis,
+                        lr_spacing_tp=acq_res[downsample_axis].item(),
+                        hr_spacing_tp=vol_res[downsample_axis].item(),
+                        lr_shape=lr_native_shape,
+                        hr_shape=tuple(target_shape),
+                        rotation_angles=rotation_angles,
+                    )
+
+                    # Step A: Transform axis-aligned LR → oblique scanner space
+                    oblique_lr = affine_resample_3d(
+                        img, lr_affine_aligned, lr_affine_oblique,
+                        lr_native_shape, mode=resample_mode,
+                    )
+
+                    # Save oblique native LR (what the scanner would produce)
+                    if self.return_intermediate:
+                        true_lr_outputs.append(oblique_lr.clone().unsqueeze(0))
+
+                    # Step B: Register oblique LR → HR grid (FOV mask captures obliqueness only)
+                    img, fov_mask = resample_with_fov_mask(
+                        oblique_lr, lr_affine_oblique, hr_affine,
+                        tuple(target_shape), mode=resample_mode,
+                    )
                 else:
+                    # No obliqueness — direct axis-aligned resampling
+                    if self.return_intermediate:
+                        true_lr_outputs.append(img.clone().unsqueeze(0))
+
+                    img, fov_mask = resample_with_fov_mask(
+                        img, lr_affine_aligned, hr_affine,
+                        tuple(target_shape), mode=resample_mode,
+                    )
+
+                fov_mask_outputs.append(fov_mask.unsqueeze(0))
+
+            else:
+                # No significant downsampling — no resampling needed
+                self._last_rotation_angles.append(None)
+
+                if self.return_intermediate:
                     true_lr_outputs.append(img.clone().unsqueeze(0))
 
-            # STEP 5: Noise
+                # FOV mask is all zeros (nothing is missing)
+                fov_mask = torch.zeros(1, *img.shape[1:], device=device)
+                fov_mask_outputs.append(fov_mask.unsqueeze(0))
+
+            # STEP 7: Noise
             if enable_noise is not None:
                 should_apply_noise = enable_noise[b].item()
             else:
@@ -243,9 +354,10 @@ class MRIArtifactSimulator(nn.Module):
             outputs.append(img.unsqueeze(0))
 
         final_output = torch.cat(outputs, dim=0)
+        final_fov_masks = torch.cat(fov_mask_outputs, dim=0)
 
         if self.return_intermediate:
             true_lr_output = torch.cat(true_lr_outputs, dim=0)
-            return final_output, true_lr_output
+            return final_output, final_fov_masks, true_lr_output
         else:
-            return final_output
+            return final_output, final_fov_masks

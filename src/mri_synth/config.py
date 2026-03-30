@@ -28,7 +28,7 @@ class ArtifactConfig(BaseModel):
 
 
 class FOVConfig(BaseModel):
-    """Configuration for FOV augmentation."""
+    """Configuration for FOV augmentation and obliqueness simulation."""
 
     enable: bool = True
     prob: float = 0.7
@@ -36,6 +36,9 @@ class FOVConfig(BaseModel):
     max_keep: float = 0.70
     ensure_coverage: bool = True
     force_both_sides: bool = True
+    obliqueness_range: float = 15.0
+    enable_obliqueness: bool = True
+    prob_obliqueness: float = 0.5
 
 
 class GenerationConfig(BaseModel):

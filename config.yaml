@@ -1,0 +1,62 @@
+# =============================================================================
+# mri-synth: Full simulation configuration
+# =============================================================================
+# Usage:  mri-synth -i <input> -o <output> --config config.yaml
+# =============================================================================
+
+# --- General ---
+num_stacks: 3                        # Number of orthogonal LR stacks per variation
+num_variations: 1                    # Number of stochastic variations per volume
+device: cpu                          # Torch device: cpu or cuda
+seed: 42                           # Random seed for reproducibility (null = random)
+
+# --- Resolution ---
+atlas_res: [1.0, 1.0, 1.0]          # Input HR voxel spacing in mm (R, A, S)
+target_res: [1.0, 1.0, 1.0]         # Target output voxel spacing in mm
+min_resolution: [1.0, 1.0, 1.0]     # Minimum (in-plane) resolution per axis in mm
+max_res_aniso: [9.0, 9.0, 9.0]      # Maximum through-plane resolution per axis in mm
+randomise_res: true                  # Randomise acquisition resolution between min and max
+
+# --- Output options ---
+clip_to_unit_range: true             # Clip all outputs to [0, 1]
+preserve_input_shape: true           # Upsample LR stacks back to HR grid shape
+upsample_mode: trilinear             # Interpolation for upsampling: trilinear, nearest
+return_intermediate: false           # Return native-resolution LR stacks (pre-upsample)
+save_native_res: true               # Save native-resolution LR stacks to disk
+
+# --- Intensity augmentation ---
+apply_intensity_aug: false           # Apply random gamma / intensity shifts
+
+# --- Orientation dropout ---
+orientation_dropout_prob: 0.0        # Probability of randomly dropping orientations
+min_orientations: 1                  # Minimum orientations to keep after dropout
+drop_orientations: null              # List of orientation indices to always drop (e.g. [2])
+
+# --- Physics ---
+physics:
+  psf_type: trapezoid                # Slice profile: boxcar, gaussian, trapezoid
+  edge_width: 0.1                    # Edge width for trapezoid PSF (ignored for others)
+  bias_field_std: 0.1                # Bias field intensity standard deviation
+  prob_bias_field: 0.5               # Probability of applying bias field corruption
+
+# --- Artifacts ---
+artifacts:
+  prob_motion: 0.2                   # Probability of motion ghosting
+  prob_spike: 0.05                   # Probability of RF spike artifact
+  prob_aliasing: 0.0                 # Probability of aliasing artifact
+  prob_noise: 0.1                    # Probability of additive Gaussian noise
+  noise_std: 0.02                    # Noise standard deviation
+  motion_intensity: 0.5              # Motion artifact intensity
+  spike_intensity: 0.04              # Spike artifact intensity
+
+# --- FOV simulation ---
+fov:
+  enable: true                       # Enable FOV (field-of-view) cropping simulation
+  prob: 0.7                          # Probability of FOV cropping per stack
+  min_keep: 0.40                     # Minimum fraction of through-plane slices to keep
+  max_keep: 0.70                     # Maximum fraction of through-plane slices to keep
+  ensure_coverage: true              # Ensure complementary FOV coverage across stacks
+  force_both_sides: true             # Drop slices from both ends (not just one)
+  obliqueness_range: 5.0            # Max obliqueness rotation per axis in degrees
+  enable_obliqueness: true           # Simulate oblique acquisitions (tilted stacks)
+  prob_obliqueness: 1.0              # Probability of applying obliqueness per stack

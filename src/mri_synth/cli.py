@@ -50,15 +50,19 @@ def generate(
     randomise_res: bool = typer.Option(True, "--randomise-res/--no-randomise-res", help="Randomize acquisition resolution"),
     return_intermediate: bool = typer.Option(False, "--return-intermediate/--no-return-intermediate", help="Return native-resolution LR (pre-upsample)"),
     upsample_mode: str = typer.Option("trilinear", "--upsample-mode", help="Interpolation mode for upsampling"),
+    obliqueness_range: float = typer.Option(15.0, "--obliqueness-range", help="Max obliqueness rotation per axis in degrees"),
+    enable_obliqueness: bool = typer.Option(True, "--enable-obliqueness/--no-obliqueness", help="Enable oblique acquisition simulation"),
+    prob_obliqueness: float = typer.Option(0.5, "--prob-obliqueness", help="Probability of applying obliqueness per stack"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file (overrides CLI flags)"),
 ):
     """Generate synthetic LR MRI stacks from HR volumes."""
     import torch
 
     from mri_synth.config import GenerationConfig
+    from mri_synth.fov.resampling import euler_to_rotation_matrix
     from mri_synth.io import (
         create_output_structure,
-        get_interp_mask_filename,
+        get_fov_mask_filename,
         get_native_stack_filename,
         get_stack_filename,
         load_volume,
@@ -91,6 +95,9 @@ def generate(
         cfg.physics.prob_bias_field = 0.5 if enable_bias_field else 0.0
         cfg.artifacts.noise_std = noise_std
         cfg.fov.enable = enable_fov_sim
+        cfg.fov.obliqueness_range = obliqueness_range
+        cfg.fov.enable_obliqueness = enable_obliqueness
+        cfg.fov.prob_obliqueness = prob_obliqueness
         cfg.save_native_res = save_native_res
 
     # --save-native-res requires return_intermediate to generate true LR stacks
@@ -128,9 +135,9 @@ def generate(
             )
 
             if generator.return_intermediate:
-                lr_stacks, true_lr_stacks, hr_aug, resolutions, thicknesses, orient_mask, spatial_masks, interpolation_masks = result
+                lr_stacks, true_lr_stacks, hr_aug, resolutions, thicknesses, orient_mask, fov_masks = result
             else:
-                lr_stacks, hr_aug, resolutions, thicknesses, orient_mask, spatial_masks, interpolation_masks = result
+                lr_stacks, hr_aug, resolutions, thicknesses, orient_mask, fov_masks = result
 
             # Save normalized HR (once — identical across variations)
             if var_idx == 0:
@@ -151,13 +158,13 @@ def generate(
                     "thickness": thicknesses[s_idx].squeeze(0).tolist(),
                 }
 
-                interp_mask_file = get_interp_mask_filename(s_idx)
+                fov_mask_file = get_fov_mask_filename(s_idx)
                 save_volume(
-                    interpolation_masks[s_idx].squeeze(0),
-                    var_dir / interp_mask_file,
+                    fov_masks[s_idx].squeeze(0),
+                    var_dir / fov_mask_file,
                     affine,
                 )
-                stack_meta["interp_mask_file"] = interp_mask_file
+                stack_meta["fov_mask_file"] = fov_mask_file
 
                 if cfg.save_native_res and generator.return_intermediate:
                     native_file = get_native_stack_filename(s_idx)
@@ -167,6 +174,12 @@ def generate(
                     for axis in range(3):
                         scale = res[axis].item() / cfg.atlas_res[axis]
                         native_affine[:3, axis] *= scale
+                    # Apply obliqueness rotation to native affine
+                    rot_angles = generator._rotation_angles_per_stack[s_idx][0]
+                    if rot_angles is not None:
+                        rx, ry, rz = rot_angles
+                        R = euler_to_rotation_matrix(rx, ry, rz).numpy()
+                        native_affine[:3, :3] = R @ native_affine[:3, :3]
                     save_volume(
                         true_lr_stacks[s_idx].squeeze(0),
                         var_dir / native_file,

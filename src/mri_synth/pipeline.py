@@ -7,7 +7,6 @@ from monai.transforms import ScaleIntensityRangePercentiles
 
 from mri_synth.artifacts.simulator import MRIArtifactSimulator
 from mri_synth.config import GenerationConfig
-from mri_synth.fov.multi_orientation import apply_fov_augmentation
 from mri_synth.physics.bias_field import BiasFieldCorruption
 from mri_synth.physics.intensity import IntensityAugmentation
 from mri_synth.resolution import ResolutionConfig
@@ -18,7 +17,9 @@ class HRLRDataGenerator:
     Domain-randomization pipeline using frequency-domain downsampling.
 
     Generates N orthogonal LR stacks from each HR volume using FFT-based
-    k-space cropping for realistic MRI simulation.
+    k-space cropping for realistic MRI simulation. Each stack is resampled
+    back to the HR grid via affine-based resampling, producing a physically
+    correct FOV mask that captures out-of-bounds regions.
 
     Args:
         atlas_res: Resolution of input HR images in mm.
@@ -48,6 +49,9 @@ class HRLRDataGenerator:
         fov_max_keep: Maximum fraction of slices to keep in FOV sim.
         fov_ensure_coverage: If True, ensure complementary FOV coverage.
         fov_force_both_sides: If True, drop from both ends in FOV sim.
+        obliqueness_range: Max rotation per axis in degrees for obliqueness.
+        enable_obliqueness: If True, simulate oblique acquisitions.
+        prob_obliqueness: Probability of applying obliqueness per stack.
     """
 
     def __init__(
@@ -87,6 +91,10 @@ class HRLRDataGenerator:
         fov_max_keep: float = 0.70,
         fov_ensure_coverage: bool = True,
         fov_force_both_sides: bool = True,
+        # Obliqueness
+        obliqueness_range: float = 15.0,
+        enable_obliqueness: bool = True,
+        prob_obliqueness: float = 0.5,
     ):
         if atlas_res is None:
             atlas_res = [1.0, 1.0, 1.0]
@@ -165,6 +173,9 @@ class HRLRDataGenerator:
             return_intermediate=return_intermediate,
             psf_profile_type=psf_profile_type,
             psf_edge_width=psf_edge_width,
+            obliqueness_range=obliqueness_range,
+            enable_obliqueness=enable_obliqueness,
+            prob_obliqueness=prob_obliqueness,
         )
 
         self.normalizer = ScaleIntensityRangePercentiles(
@@ -201,6 +212,9 @@ class HRLRDataGenerator:
             fov_max_keep=config.fov.max_keep,
             fov_ensure_coverage=config.fov.ensure_coverage,
             fov_force_both_sides=config.fov.force_both_sides,
+            obliqueness_range=config.fov.obliqueness_range,
+            enable_obliqueness=config.fov.enable_obliqueness,
+            prob_obliqueness=config.fov.prob_obliqueness,
         )
 
     def _normalize_image(self, image: torch.Tensor) -> torch.Tensor:
@@ -238,56 +252,48 @@ class HRLRDataGenerator:
 
         return mask
 
-    def _create_interpolation_masks(
-        self,
-        resolutions: List[torch.Tensor],
-        hr_shape: Tuple[int, int, int],
-        device: torch.device,
-    ) -> List[torch.Tensor]:
+    def _compute_fov_drop_decisions(
+        self, batch_size: int, device: torch.device
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """
-        Create binary masks indicating interpolated (1) vs acquired (0) slices.
-
-        For each stack, marks which slices on the HR grid were actually acquired
-        vs interpolated during resampling from LR to HR.
-
-        Args:
-            resolutions: num_stacks list of tensors, each (batch_size, 3).
-            hr_shape: Spatial dimensions (D, H, W) of the HR grid.
-            device: Torch device.
+        Pre-compute per-stack FOV drop decisions with coverage guarantees.
 
         Returns:
-            List of num_stacks tensors, each (batch_size, 1, D, H, W).
+            Tuple of (drop_decisions, keep_fractions), each a list of
+            num_stacks tensors of shape (batch_size,).
         """
-        through_plane_axes = [2, 1, 0]
-        batch_size = resolutions[0].shape[0]
-        masks = []
+        drop_decisions = []
+        keep_fractions = []
 
-        for stack_idx in range(self.num_stacks):
-            tp_axis = through_plane_axes[stack_idx % 3]
-            axis_size = hr_shape[tp_axis]
-            atlas_spacing = self.atlas_res[tp_axis]
+        for _ in range(self.num_stacks):
+            drop_decisions.append(torch.zeros(batch_size, dtype=torch.bool, device=device))
+            keep_fractions.append(torch.ones(batch_size, dtype=torch.float32, device=device))
 
-            mask = torch.ones(batch_size, 1, *hr_shape, device=device)
+        if self.fov_augmentation_prob <= 0:
+            return drop_decisions, keep_fractions
 
-            for b in range(batch_size):
-                lr_spacing = resolutions[stack_idx][b, tp_axis].item()
-                factor = lr_spacing / atlas_spacing
-                num_acquired = int(axis_size / factor) + 1
-                acquired_indices = torch.round(
-                    torch.arange(num_acquired, device=device, dtype=torch.float32)
-                    * factor
-                ).long()
-                acquired_indices = acquired_indices[acquired_indices < axis_size]
+        for b in range(batch_size):
+            batch_drops = []
+            for s in range(self.num_stacks):
+                should_drop = torch.rand(1).item() < self.fov_augmentation_prob
+                batch_drops.append(should_drop)
 
-                if tp_axis == 0:
-                    mask[b, :, acquired_indices, :, :] = 0
-                elif tp_axis == 1:
-                    mask[b, :, :, acquired_indices, :] = 0
-                else:
-                    mask[b, :, :, :, acquired_indices] = 0
+            # Coverage guarantee: if all stacks would be dropped, keep one
+            if self.fov_ensure_coverage and all(batch_drops):
+                keep_idx = torch.randint(0, self.num_stacks, (1,)).item()
+                batch_drops[keep_idx] = False
 
-            masks.append(mask)
-        return masks
+            for s in range(self.num_stacks):
+                drop_decisions[s][b] = batch_drops[s]
+                if batch_drops[s]:
+                    frac = (
+                        torch.rand(1).item()
+                        * (self.fov_max_keep - self.fov_min_keep)
+                        + self.fov_min_keep
+                    )
+                    keep_fractions[s][b] = frac
+
+        return drop_decisions, keep_fractions
 
     def _create_orthogonal_resolutions(
         self,
@@ -390,7 +396,8 @@ class HRLRDataGenerator:
 
         Returns:
             Variable-length tuple depending on return_resolution and
-            return_intermediate flags.
+            return_intermediate flags. FOV masks (single list) replace the
+            old spatial_masks and interpolation_masks.
         """
         batch_size = hr_images.shape[0]
         device = hr_images.device
@@ -437,8 +444,15 @@ class HRLRDataGenerator:
             for b in range(batch_size):
                 hr_degraded[b : b + 1] = self.intensity_aug(hr_degraded[b : b + 1])
 
+        # Pre-compute FOV drop decisions with coverage guarantees
+        fov_drop_decisions, fov_keep_fractions = self._compute_fov_drop_decisions(
+            batch_size, device
+        )
+
         lr_stacks = []
         true_lr_stacks = []
+        fov_masks = []
+        self._rotation_angles_per_stack = []
 
         for stack_idx in range(self.num_stacks):
             lr_images = hr_degraded.clone()
@@ -447,9 +461,8 @@ class HRLRDataGenerator:
             resolution = resolutions[stack_idx]
             thickness = thicknesses[stack_idx]
 
-            # BUG FIX #5: use self.return_intermediate consistently
             if self.return_intermediate:
-                lr_images, true_lr_images = self.artifact_simulator(
+                lr_images, stack_fov_masks, true_lr_images = self.artifact_simulator(
                     lr_images,
                     resolution,
                     thickness,
@@ -459,9 +472,12 @@ class HRLRDataGenerator:
                     enable_noise=apply_noise,
                     motion_axis=motion_axis,
                     aliasing_axis=aliasing_axis,
+                    fov_drop_decisions=fov_drop_decisions[stack_idx],
+                    fov_keep_fractions=fov_keep_fractions[stack_idx],
+                    fov_force_both_sides=self.fov_force_both_sides,
                 )
             else:
-                lr_images = self.artifact_simulator(
+                lr_images, stack_fov_masks = self.artifact_simulator(
                     lr_images,
                     resolution,
                     thickness,
@@ -471,7 +487,14 @@ class HRLRDataGenerator:
                     enable_noise=apply_noise,
                     motion_axis=motion_axis,
                     aliasing_axis=aliasing_axis,
+                    fov_drop_decisions=fov_drop_decisions[stack_idx],
+                    fov_keep_fractions=fov_keep_fractions[stack_idx],
+                    fov_force_both_sides=self.fov_force_both_sides,
                 )
+
+            self._rotation_angles_per_stack.append(
+                self.artifact_simulator._last_rotation_angles
+            )
 
             # Normalize LR to [0, 1] — match HR's simple clamp
             if self.clip_to_unit_range:
@@ -480,31 +503,13 @@ class HRLRDataGenerator:
                     true_lr_images = torch.clamp(true_lr_images, 0.0, 1.0)
 
             lr_stacks.append(lr_images)
+            fov_masks.append(stack_fov_masks)
             if self.return_intermediate:
                 true_lr_stacks.append(true_lr_images)
 
         hr_augmented = torch.clamp(hr_augmented, 0.0, 1.0)
 
         orientation_mask = self._create_orientation_mask(batch_size, device)
-
-        if self.fov_augmentation_prob > 0:
-            lr_stacks, spatial_masks = apply_fov_augmentation(
-                lr_stacks,
-                prob=self.fov_augmentation_prob,
-                min_keep=self.fov_min_keep,
-                max_keep=self.fov_max_keep,
-                ensure_coverage=self.fov_ensure_coverage,
-                force_both_sides=self.fov_force_both_sides,
-            )
-        else:
-            spatial_masks = [
-                torch.ones(batch_size, 1, *lr_stacks[0].shape[-3:], device=device)
-                for _ in range(self.num_stacks)
-            ]
-
-        interpolation_masks = self._create_interpolation_masks(
-            resolutions, hr_images.shape[-3:], device
-        )
 
         if return_resolution and self.return_intermediate:
             return (
@@ -514,8 +519,7 @@ class HRLRDataGenerator:
                 resolutions,
                 thicknesses,
                 orientation_mask,
-                spatial_masks,
-                interpolation_masks,
+                fov_masks,
             )
         elif return_resolution:
             return (
@@ -524,8 +528,7 @@ class HRLRDataGenerator:
                 resolutions,
                 thicknesses,
                 orientation_mask,
-                spatial_masks,
-                interpolation_masks,
+                fov_masks,
             )
         else:
-            return lr_stacks, hr_augmented, orientation_mask, spatial_masks, interpolation_masks
+            return lr_stacks, hr_augmented, orientation_mask, fov_masks

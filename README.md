@@ -32,11 +32,11 @@ output/
     hr.nii.gz
     variation_000/
       stack_0_axial.nii.gz
-      stack_0_axial_interp_mask.nii.gz
+      stack_0_axial_fov_mask.nii.gz
       stack_1_coronal.nii.gz
-      stack_1_coronal_interp_mask.nii.gz
+      stack_1_coronal_fov_mask.nii.gz
       stack_2_sagittal.nii.gz
-      stack_2_sagittal_interp_mask.nii.gz
+      stack_2_sagittal_fov_mask.nii.gz
       metadata.json
     variation_001/
       ...
@@ -57,6 +57,9 @@ output/
 | `--noise-std` | `0.02` | Noise standard deviation |
 | `--min-res` | `1.0 1.0 1.0` | Minimum resolution per axis (3 values) |
 | `--max-res-aniso` | `9.0 9.0 9.0` | Maximum anisotropic resolution (3 values) |
+| `--obliqueness-range` | `15.0` | Max obliqueness rotation per axis in degrees |
+| `--enable-obliqueness` / `--no-obliqueness` | enabled | Simulate oblique acquisitions |
+| `--prob-obliqueness` | `0.5` | Probability of applying obliqueness per stack |
 | `--save-native-res` / `--no-save-native-res` | disabled | Save native-resolution LR stacks (pre-upsample) |
 | `--clip-to-unit-range` / `--no-clip-to-unit-range` | enabled | Clip outputs to [0, 1] |
 | `--preserve-input-shape` / `--no-preserve-input-shape` | enabled | Upsample LR back to input shape |
@@ -88,6 +91,9 @@ fov:
   prob: 0.7
   min_keep: 0.40
   max_keep: 0.70
+  obliqueness_range: 15.0
+  enable_obliqueness: true
+  prob_obliqueness: 0.5
 ```
 
 ```bash
@@ -114,12 +120,11 @@ dataset = create_dataset(
     use_cache=True,
 )
 
-lr_stacks, hr, orientation_mask, spatial_masks, interp_masks = dataset[0]
+lr_stacks, hr, orientation_mask, fov_masks = dataset[0]
 # lr_stacks: list of N tensors (C, D, H, W)
 # hr: tensor (C, D, H, W)
 # orientation_mask: bool tensor (num_stacks,)
-# spatial_masks: list of N tensors (C, D, H, W)
-# interp_masks: list of N binary tensors (C, D, H, W) — 1=interpolated, 0=acquired
+# fov_masks: list of N binary tensors (1, D, H, W) — 1=missing (out-of-bounds), 0=valid
 ```
 
 ### Using `GeneratorDataset` with a MONAI base dataset
@@ -145,7 +150,7 @@ dataset = GeneratorDataset(
     balanced_orientation_combos=True,
 )
 
-lr_stacks, hr, resolutions, thicknesses, orientation_mask, spatial_masks, interp_masks = dataset[0]
+lr_stacks, hr, resolutions, thicknesses, orientation_mask, fov_masks = dataset[0]
 ```
 
 ### Using `HRLRDataGenerator` directly
@@ -162,7 +167,7 @@ generator = HRLRDataGenerator(
 )
 
 hr_batch = torch.randn(2, 1, 128, 128, 128)  # (B, C, D, H, W)
-lr_stacks, hr_aug, orientation_mask, spatial_masks, interp_masks = generator.generate_paired_data(hr_batch)
+lr_stacks, hr_aug, orientation_mask, fov_masks = generator.generate_paired_data(hr_batch)
 ```
 
 ### Balanced orientation combos
@@ -234,6 +239,9 @@ For distributed training, call `set_epoch(epoch)` on each rank to keep schedules
 | `max_keep` | `0.70` | Maximum fraction of slices to keep |
 | `ensure_coverage` | `true` | Ensure complementary FOV coverage across stacks |
 | `force_both_sides` | `true` | Drop slices from both ends |
+| `obliqueness_range` | `15.0` | Max rotation per axis in degrees |
+| `enable_obliqueness` | `true` | Enable oblique acquisition simulation |
+| `prob_obliqueness` | `0.5` | Probability of applying obliqueness per stack |
 
 ### Loading and saving configs
 
@@ -249,18 +257,37 @@ cfg.to_yaml("updated_config.yaml")
 
 The pipeline applies the following steps to each HR volume:
 
-1. **Percentile normalization** — Scale intensities to [0, 1] using 0.5th–99.5th percentiles
+1. **Percentile normalization** — Scale intensities to [0, 1] using 0.5th-99.5th percentiles
 2. **Bias field corruption** — Smooth multiplicative field applied once (shared across all stacks)
 3. **Intensity/gamma augmentation** — Random gamma and intensity shifts (shared across all stacks)
 4. **Per-stack simulation** (repeated for each of N stacks):
-   - Orthogonal resolution assignment — cycles through axial (axis 2) → coronal (axis 1) → sagittal (axis 0)
+   - Orthogonal resolution assignment — cycles through axial (axis 2) -> coronal (axis 1) -> sagittal (axis 0)
    - PSF blurring with configurable slice profile (boxcar/gaussian/trapezoid)
    - K-space artifact injection (motion ghosting, RF spikes, aliasing)
    - FFT-based downsampling via k-space cropping
-   - Trilinear upsampling back to HR grid
-   - Additive Gaussian noise
-5. **FOV simulation** — Drop slices from stack edges with coverage guarantees
-6. **Interpolation mask generation** — Binary mask per stack marking which HR-grid slices are interpolated (1) vs acquired (0)
+   - FOV slice drop on native LR (optional, simulates incomplete coverage)
+   - Affine-based resampling to HR grid with obliqueness simulation
+   - FOV mask generation via the "dummy mask trick"
+   - Additive Rician noise
+
+### FOV Mask and Obliqueness
+
+The FOV mask captures the physical difference between the LR stack's native coordinate system and the HR target grid. It is generated using the **dummy mask trick**:
+
+1. After FFT downsampling, we have the true LR volume in its native resolution
+2. An all-ones "dummy" volume of the same shape is created
+3. Both are resampled to the HR grid using affine-based `grid_sample`
+4. The dummy is resampled with nearest-neighbor interpolation — voxels that map outside the LR FOV become 0
+5. The result is inverted to produce the final mask: **1 where voxels are missing** (out-of-bounds in the LR stack), **0 where valid LR data exists**
+
+**Obliqueness simulation** makes the mask non-trivial: small random rotations are applied to each LR stack's affine matrix (with configurable probability and range), simulating the real-world tilt of clinical MRI acquisitions relative to the atlas grid. This creates characteristic triangular empty regions at volume corners after resampling.
+
+Without obliqueness, aligned LR and HR grids produce an all-ones mask (no boundary effects). The mask is most useful when:
+- The LR stack is oblique (rotated) relative to the target grid
+- The LR and HR fields of view differ in size
+- FOV slice dropping removes edge slices before resampling
+
+The network uses the FOV mask in the loss function to ignore artificial zero-padding and focus only on valid data regions.
 
 ## License
 
