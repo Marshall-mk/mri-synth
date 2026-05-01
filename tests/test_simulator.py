@@ -119,8 +119,10 @@ class TestMRIArtifactSimulator:
         )
         acq_res = torch.tensor([[1.0, 1.0, 5.0]])
         out, fov_masks, true_lr = sim(vol, acq_res)
-        # Center of resampled output should still have signal
-        center_val = out[0, 0, 14:18, 14:18, 2:4].mean()
+        # Brain content was at HR [12:20, 12:20, 12:20]; center alignment
+        # in build_lr_affine preserves the world-space position, so after
+        # resampling back to HR the signal lands at the same region.
+        center_val = out[0, 0, 14:18, 14:18, 14:18].mean()
         assert center_val > 0.3, (
             f"Center of registered LR should retain brain content (got {center_val:.4f})"
         )

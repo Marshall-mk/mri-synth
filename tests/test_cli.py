@@ -33,7 +33,6 @@ class TestCLI:
         result = runner.invoke(
             app,
             [
-                "generate",
                 "--input", str(nifti_path),
                 "--output-dir", str(output_dir),
                 "--num-stacks", "3",
@@ -53,7 +52,6 @@ class TestCLI:
         result = runner.invoke(
             app,
             [
-                "generate",
                 "--input", str(input_dir),
                 "--output-dir", str(output_dir),
                 "--num-variations", "1",
@@ -74,7 +72,6 @@ class TestCLI:
         result = runner.invoke(
             app,
             [
-                "generate",
                 "--input", str(nifti_path),
                 "--output-dir", str(output_dir),
                 "--config", str(cfg_path),
@@ -86,7 +83,6 @@ class TestCLI:
         result = runner.invoke(
             app,
             [
-                "generate",
                 "--input", "/nonexistent/path.nii.gz",
                 "--output-dir", str(tmp_path / "out"),
             ],
