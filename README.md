@@ -60,9 +60,11 @@ output/
 | `--obliqueness-range` | `15.0` | Max obliqueness rotation per axis in degrees |
 | `--enable-obliqueness` / `--no-obliqueness` | enabled | Simulate oblique acquisitions |
 | `--prob-obliqueness` | `0.5` | Probability of applying obliqueness per stack |
+| `--tight-fov` / `--no-tight-fov` | enabled | Size LR scan FOV to brain bbox |
+| `--tight-fov-threshold` | `1e-3` | Foreground intensity threshold for bbox detection |
+| `--tight-fov-margin` | `0` | Voxel margin around the brain bbox |
 | `--save-native-res` / `--no-save-native-res` | disabled | Save native-resolution LR stacks (pre-upsample) |
 | `--clip-to-unit-range` / `--no-clip-to-unit-range` | enabled | Clip outputs to [0, 1] |
-| `--preserve-input-shape` / `--no-preserve-input-shape` | enabled | Upsample LR back to input shape |
 | `--apply-intensity-aug` / `--no-intensity-aug` | disabled | Apply intensity augmentation |
 | `--randomise-res` / `--no-randomise-res` | enabled | Randomize acquisition resolution |
 | `--return-intermediate` / `--no-return-intermediate` | disabled | Return native-resolution LR (pre-upsample) |
@@ -199,7 +201,6 @@ For distributed training, call `set_epoch(epoch)` on each rank to keep schedules
 | `apply_intensity_aug` | `false` | Apply gamma/intensity augmentation |
 | `clip_to_unit_range` | `true` | Clip outputs to [0, 1] |
 | `upsample_mode` | `trilinear` | Interpolation mode for upsampling |
-| `preserve_input_shape` | `true` | Upsample LR back to input shape |
 | `return_intermediate` | `false` | Return native-resolution LR (pre-upsample) |
 | `save_native_res` | `false` | Save native-res stacks to disk (CLI) |
 | `orientation_dropout_prob` | `0.0` | Probability of dropping orientations |
@@ -275,13 +276,13 @@ The pipeline applies the following steps to each HR volume:
 
 ### FOV Mask and Obliqueness
 
-The FOV mask captures the physical difference between the LR stack's native coordinate system and the HR target grid. It is generated using the **dummy mask trick**:
+The FOV mask captures the physical difference between the LR stack's native coordinate system and the HR target grid. It is generated using the **support-mask trick**:
 
 1. After FFT downsampling, we have the true LR volume in its native resolution
-2. An all-ones "dummy" volume of the same shape is created
-3. Both are resampled to the HR grid using affine-based `grid_sample`
-4. The dummy is resampled with nearest-neighbor interpolation — voxels that map outside the LR FOV become 0
-5. The result is inverted to produce the final mask: **1 where voxels are missing** (out-of-bounds in the LR stack), **0 where valid LR data exists**
+2. A binary support volume of the same shape is created. By default this is the brain-bbox mask resampled into LR space (see `tight_fov` below); with `tight_fov=False` it is just an all-ones "dummy"
+3. Any FOV slice drop is applied to *both* the image and the support, so dropped slabs propagate into the mask
+4. Both are resampled to the HR grid using affine-based `grid_sample` (nearest-neighbor for the support)
+5. The support is inverted to produce the final mask: **1 where voxels are missing** (out-of-bounds in the LR stack, in the air around the brain bbox, or in a dropped slab), **0 where valid LR data exists**
 
 **Obliqueness simulation** makes the mask non-trivial: small random rotations are applied to each LR stack's affine matrix (with configurable probability and range), simulating the real-world tilt of clinical MRI acquisitions relative to the atlas grid. This creates characteristic triangular empty regions at volume corners after resampling.
 
