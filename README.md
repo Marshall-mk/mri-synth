@@ -96,6 +96,9 @@ fov:
   obliqueness_range: 15.0
   enable_obliqueness: true
   prob_obliqueness: 0.5
+  tight_fov: true
+  tight_fov_threshold: 1.0e-3
+  tight_fov_margin: 0
 ```
 
 ```bash
