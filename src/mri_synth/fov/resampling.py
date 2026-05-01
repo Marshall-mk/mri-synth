@@ -222,36 +222,6 @@ def resample_with_fov_mask(
     return resampled_image, fov_mask
 
 
-def compute_oblique_fov_mask(
-    lr_shape: Tuple[int, int, int],
-    lr_affine_oblique: torch.Tensor,
-    hr_affine: torch.Tensor,
-    hr_shape: Tuple[int, int, int],
-    device: torch.device = None,
-) -> torch.Tensor:
-    """Compute a FOV mask using an oblique affine without resampling image data.
-
-    Creates a dummy all-ones volume in LR native space and resamples it to the
-    HR grid using the oblique affine. Voxels that fall outside the tilted LR FOV
-    become 0; these are inverted so 1 = missing, 0 = valid.
-
-    Args:
-        lr_shape: Spatial shape (D, H, W) of the native LR volume.
-        lr_affine_oblique: 4x4 affine with oblique rotation applied.
-        hr_affine: 4x4 affine of the HR target grid.
-        hr_shape: Spatial dimensions (D, H, W) of the HR grid.
-        device: Torch device for the dummy volume.
-
-    Returns:
-        FOV mask (1, D, H, W) where 1 = missing, 0 = valid.
-    """
-    dummy = torch.ones(1, *lr_shape, device=device)
-    validity = affine_resample_3d(
-        dummy, lr_affine_oblique, hr_affine, hr_shape, mode="nearest"
-    )
-    return 1.0 - validity
-
-
 def apply_fov_slice_drop_native(
     volume: torch.Tensor,
     through_plane_axis: int,

@@ -41,7 +41,6 @@ class HRLRDataGenerator:
         min_orientations: Minimum orientations to keep after dropout.
         drop_orientations: Specific orientations to always drop.
         upsample_mode: Interpolation mode for upsampling.
-        preserve_input_shape: If True, upsample back to input shape.
         return_intermediate: If True, return true LR before upsample.
         psf_profile_type: Slice profile type.
         psf_edge_width: Edge width for trapezoid profile.
@@ -85,7 +84,6 @@ class HRLRDataGenerator:
         drop_orientations: list = None,
         # Interpolation mode
         upsample_mode: str = "trilinear",
-        preserve_input_shape: bool = True,
         # LR stack saving
         return_intermediate: bool = False,
         # PSF configuration
@@ -129,7 +127,6 @@ class HRLRDataGenerator:
         self.fov_ensure_coverage = fov_ensure_coverage
         self.fov_force_both_sides = fov_force_both_sides
         self.upsample_mode = upsample_mode
-        self.preserve_input_shape = preserve_input_shape
         self.return_intermediate = return_intermediate
 
         # Orientation dropout
@@ -178,7 +175,6 @@ class HRLRDataGenerator:
             noise_std=0.02,
             motion_intensity=0.5,
             upsample_mode=upsample_mode,
-            preserve_input_shape=preserve_input_shape,
             return_intermediate=return_intermediate,
             psf_profile_type=psf_profile_type,
             psf_edge_width=psf_edge_width,
@@ -216,7 +212,6 @@ class HRLRDataGenerator:
             min_orientations=config.min_orientations,
             drop_orientations=config.drop_orientations,
             upsample_mode=config.upsample_mode,
-            preserve_input_shape=config.preserve_input_shape,
             return_intermediate=config.return_intermediate,
             psf_profile_type=config.physics.psf_type,
             psf_edge_width=config.physics.edge_width,

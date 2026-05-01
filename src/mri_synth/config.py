@@ -57,7 +57,6 @@ class GenerationConfig(BaseModel):
     apply_intensity_aug: bool = False
     clip_to_unit_range: bool = True
     upsample_mode: str = "trilinear"
-    preserve_input_shape: bool = True
     return_intermediate: bool = False
     save_native_res: bool = False
     orientation_dropout_prob: float = 0.0

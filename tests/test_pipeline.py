@@ -2,7 +2,6 @@
 
 import torch
 
-from mri_synth.fov.slice_drop import FOVSliceDrop
 from mri_synth.pipeline import HRLRDataGenerator
 from mri_synth.config import GenerationConfig
 
@@ -11,7 +10,6 @@ class TestHRLRDataGenerator:
     def test_produces_n_stacks(self, synthetic_volume):
         gen = HRLRDataGenerator(
             num_stacks=3,
-            preserve_input_shape=True,
             return_intermediate=False,
             fov_augmentation_prob=0.0,
             enable_obliqueness=False,
@@ -26,7 +24,6 @@ class TestHRLRDataGenerator:
     def test_produces_6_stacks(self, synthetic_volume):
         gen = HRLRDataGenerator(
             num_stacks=6,
-            preserve_input_shape=True,
             return_intermediate=False,
             fov_augmentation_prob=0.0,
             enable_obliqueness=False,
@@ -42,7 +39,6 @@ class TestHRLRDataGenerator:
         """Different calls produce different stochastic degradations."""
         gen = HRLRDataGenerator(
             num_stacks=3,
-            preserve_input_shape=True,
             return_intermediate=False,
             fov_augmentation_prob=0.0,
             enable_obliqueness=False,
@@ -57,7 +53,6 @@ class TestHRLRDataGenerator:
     def test_return_resolution(self, synthetic_volume):
         gen = HRLRDataGenerator(
             num_stacks=3,
-            preserve_input_shape=True,
             return_intermediate=False,
             fov_augmentation_prob=0.0,
             enable_obliqueness=False,
@@ -70,7 +65,6 @@ class TestHRLRDataGenerator:
     def test_return_intermediate(self, synthetic_volume):
         gen = HRLRDataGenerator(
             num_stacks=3,
-            preserve_input_shape=True,
             return_intermediate=True,
             fov_augmentation_prob=0.0,
             enable_obliqueness=False,
@@ -84,7 +78,6 @@ class TestHRLRDataGenerator:
     def test_from_config(self, synthetic_volume):
         cfg = GenerationConfig(
             num_stacks=3,
-            preserve_input_shape=True,
             return_intermediate=False,
         )
         cfg.fov.enable = False
@@ -99,7 +92,6 @@ class TestHRLRDataGenerator:
         """Full pipeline produces valid shapes."""
         gen = HRLRDataGenerator(
             num_stacks=3,
-            preserve_input_shape=True,
             return_intermediate=False,
             fov_augmentation_prob=0.0,
             enable_obliqueness=False,
@@ -122,7 +114,6 @@ class TestHRLRDataGenerator:
             prob_bias_field=1.0,
             randomise_res=False,
             apply_intensity_aug=True,
-            preserve_input_shape=True,
             return_intermediate=False,
             fov_augmentation_prob=0.0,
             clip_to_unit_range=False,
@@ -153,7 +144,6 @@ class TestHRLRDataGenerator:
         """FOV masks should match stack count and HR spatial shape."""
         gen = HRLRDataGenerator(
             num_stacks=3,
-            preserve_input_shape=True,
             return_intermediate=False,
             fov_augmentation_prob=0.0,
             enable_obliqueness=False,
@@ -171,7 +161,6 @@ class TestHRLRDataGenerator:
         """FOV masks should contain only 0s and 1s."""
         gen = HRLRDataGenerator(
             num_stacks=3,
-            preserve_input_shape=True,
             return_intermediate=False,
             fov_augmentation_prob=0.0,
             enable_obliqueness=False,
@@ -185,7 +174,6 @@ class TestHRLRDataGenerator:
         """Without obliqueness and FOV drop, masks should be all zeros (nothing missing)."""
         gen = HRLRDataGenerator(
             num_stacks=3,
-            preserve_input_shape=True,
             return_intermediate=False,
             fov_augmentation_prob=0.0,
             enable_obliqueness=False,
@@ -198,7 +186,6 @@ class TestHRLRDataGenerator:
         """With large obliqueness, masks should have ones (missing regions)."""
         gen = HRLRDataGenerator(
             num_stacks=3,
-            preserve_input_shape=True,
             return_intermediate=False,
             fov_augmentation_prob=0.0,
             enable_obliqueness=True,
@@ -216,7 +203,6 @@ class TestHRLRDataGenerator:
         """FOV masks should be returned with return_resolution=True."""
         gen = HRLRDataGenerator(
             num_stacks=3,
-            preserve_input_shape=True,
             return_intermediate=False,
             fov_augmentation_prob=0.0,
             enable_obliqueness=False,
@@ -227,8 +213,3 @@ class TestHRLRDataGenerator:
         for mask in fov_masks:
             assert mask.shape[0] == synthetic_volume.shape[0]
             assert mask.shape[2:] == synthetic_volume.shape[2:]
-
-    def test_fov_force_both_sides_default(self):
-        """FOVSliceDrop should default to force_both_sides=True."""
-        dropper = FOVSliceDrop()
-        assert dropper.force_both_sides is True

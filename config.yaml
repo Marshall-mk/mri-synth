@@ -19,7 +19,6 @@ randomise_res: true                  # Randomise acquisition resolution between 
 
 # --- Output options ---
 clip_to_unit_range: true             # Clip all outputs to [0, 1]
-preserve_input_shape: true           # Upsample LR stacks back to HR grid shape
 upsample_mode: trilinear             # Interpolation for upsampling: trilinear, nearest
 return_intermediate: false           # Return native-resolution LR stacks (pre-upsample)
 save_native_res: true               # Save native-resolution LR stacks to disk

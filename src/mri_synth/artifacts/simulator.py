@@ -47,7 +47,6 @@ class MRIArtifactSimulator(nn.Module):
         motion_intensity: Intensity of motion ghosting.
         spike_intensity: Intensity of spike artifact.
         upsample_mode: Interpolation mode for upsampling.
-        preserve_input_shape: If True, upsample back to input shape.
         return_intermediate: If True, also return true LR before upsample.
         psf_profile_type: Slice profile type ('trapezoid', 'gaussian', 'boxcar').
         psf_edge_width: Edge width for trapezoid profile.
@@ -74,7 +73,6 @@ class MRIArtifactSimulator(nn.Module):
         motion_intensity: float = 1.5,
         spike_intensity: float = 0.04,
         upsample_mode: str = "trilinear",
-        preserve_input_shape: bool = True,
         return_intermediate: bool = False,
         psf_profile_type: str = "trapezoid",
         psf_edge_width: float = 0.1,
@@ -97,7 +95,6 @@ class MRIArtifactSimulator(nn.Module):
         self.motion_intensity = motion_intensity
         self.spike_intensity = spike_intensity
         self.upsample_mode = upsample_mode
-        self.preserve_input_shape = preserve_input_shape
         self.return_intermediate = return_intermediate
         self.obliqueness_range = obliqueness_range
         self.enable_obliqueness = enable_obliqueness

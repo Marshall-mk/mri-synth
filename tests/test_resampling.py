@@ -9,7 +9,6 @@ from mri_synth.fov.resampling import (
     apply_fov_slice_drop_native,
     build_lr_affine,
     compute_brain_bbox_support_mask,
-    compute_oblique_fov_mask,
     euler_to_rotation_matrix,
     resample_with_fov_mask,
 )
@@ -156,48 +155,6 @@ class TestResampleWithFovMask:
         assert fov_mask_with_support.sum() > fov_mask_without.sum(), (
             "Support mask with dropped slices should produce more missing voxels"
         )
-
-
-class TestComputeObliqueFovMask:
-    def test_aligned_mask_mostly_zeros(self):
-        """Axis-aligned affine should produce mostly-zero mask."""
-        hr_affine = torch.diag(torch.tensor([1.0, 1.0, 1.0, 1.0]))
-        lr_shape = (32, 32, 6)
-        hr_shape = (32, 32, 32)
-        lr_affine = build_lr_affine(
-            hr_affine, through_plane_axis=2, lr_spacing_tp=5.0,
-            hr_spacing_tp=1.0, lr_shape=lr_shape, hr_shape=hr_shape,
-            rotation_angles=None,
-        )
-        mask = compute_oblique_fov_mask(lr_shape, lr_affine, hr_affine, hr_shape)
-        assert (mask == 0).sum() > (mask == 1).sum()
-
-    def test_oblique_mask_has_ones(self):
-        """Oblique affine should produce ones (missing) at edges."""
-        hr_affine = torch.diag(torch.tensor([1.0, 1.0, 1.0, 1.0]))
-        lr_shape = (32, 32, 6)
-        hr_shape = (32, 32, 32)
-        lr_affine = build_lr_affine(
-            hr_affine, through_plane_axis=2, lr_spacing_tp=5.0,
-            hr_spacing_tp=1.0, lr_shape=lr_shape, hr_shape=hr_shape,
-            rotation_angles=(0.3, 0.3, 0.3),
-        )
-        mask = compute_oblique_fov_mask(lr_shape, lr_affine, hr_affine, hr_shape)
-        assert 1.0 in mask
-
-    def test_mask_is_binary(self):
-        """FOV mask should only contain 0s and 1s."""
-        hr_affine = torch.diag(torch.tensor([1.0, 1.0, 1.0, 1.0]))
-        lr_shape = (32, 32, 6)
-        hr_shape = (32, 32, 32)
-        lr_affine = build_lr_affine(
-            hr_affine, through_plane_axis=2, lr_spacing_tp=5.0,
-            hr_spacing_tp=1.0, lr_shape=lr_shape, hr_shape=hr_shape,
-            rotation_angles=(0.1, -0.2, 0.15),
-        )
-        mask = compute_oblique_fov_mask(lr_shape, lr_affine, hr_affine, hr_shape)
-        unique_vals = torch.unique(mask)
-        assert all(v in [0.0, 1.0] for v in unique_vals.tolist())
 
 
 class TestApplyFovSliceDropNative:

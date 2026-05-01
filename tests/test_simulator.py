@@ -10,7 +10,6 @@ class TestMRIArtifactSimulator:
         sim = MRIArtifactSimulator(
             volume_res=[1.0, 1.0, 1.0],
             target_res=[1.0, 1.0, 1.0],
-            preserve_input_shape=True,
             return_intermediate=True,
             enable_obliqueness=False,
         )
@@ -22,7 +21,6 @@ class TestMRIArtifactSimulator:
         sim = MRIArtifactSimulator(
             volume_res=[1.0, 1.0, 1.0],
             target_res=[1.0, 1.0, 1.0],
-            preserve_input_shape=True,
             return_intermediate=False,
             enable_obliqueness=False,
         )
@@ -38,7 +36,6 @@ class TestMRIArtifactSimulator:
             volume_res=[1.0, 1.0, 1.0],
             target_res=[1.0, 1.0, 1.0],
             return_intermediate=True,
-            preserve_input_shape=False,
             enable_obliqueness=False,
         )
         acq_res = torch.tensor([[1.0, 1.0, 5.0]])
@@ -66,7 +63,6 @@ class TestMRIArtifactSimulator:
         sim = MRIArtifactSimulator(
             volume_res=[1.0, 1.0, 1.0],
             target_res=[1.0, 1.0, 1.0],
-            preserve_input_shape=True,
             return_intermediate=False,
             enable_obliqueness=False,
         )
@@ -83,7 +79,6 @@ class TestMRIArtifactSimulator:
         sim = MRIArtifactSimulator(
             volume_res=[1.0, 1.0, 1.0],
             target_res=[1.0, 1.0, 1.0],
-            preserve_input_shape=True,
             return_intermediate=False,
             enable_obliqueness=True,
             prob_obliqueness=1.0,
@@ -107,7 +102,6 @@ class TestMRIArtifactSimulator:
         sim = MRIArtifactSimulator(
             volume_res=[1.0, 1.0, 1.0],
             target_res=[1.0, 1.0, 1.0],
-            preserve_input_shape=True,
             return_intermediate=True,
             enable_obliqueness=True,
             prob_obliqueness=1.0,
@@ -133,7 +127,6 @@ class TestMRIArtifactSimulator:
         sim = MRIArtifactSimulator(
             volume_res=[1.0, 1.0, 1.0],
             target_res=[1.0, 1.0, 1.0],
-            preserve_input_shape=True,
             return_intermediate=False,
             enable_obliqueness=True,
             prob_obliqueness=1.0,
@@ -159,7 +152,6 @@ class TestMRIArtifactSimulator:
         sim_tight = MRIArtifactSimulator(
             volume_res=[1.0, 1.0, 1.0],
             target_res=[1.0, 1.0, 1.0],
-            preserve_input_shape=True,
             return_intermediate=False,
             enable_obliqueness=False,
             prob_motion=0.0,
@@ -171,7 +163,6 @@ class TestMRIArtifactSimulator:
         sim_loose = MRIArtifactSimulator(
             volume_res=[1.0, 1.0, 1.0],
             target_res=[1.0, 1.0, 1.0],
-            preserve_input_shape=True,
             return_intermediate=False,
             enable_obliqueness=False,
             prob_motion=0.0,
@@ -203,7 +194,6 @@ class TestMRIArtifactSimulator:
         common = dict(
             volume_res=[1.0, 1.0, 1.0],
             target_res=[1.0, 1.0, 1.0],
-            preserve_input_shape=True,
             return_intermediate=False,
             prob_motion=0.0,
             prob_spike=0.0,
