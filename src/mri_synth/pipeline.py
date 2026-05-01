@@ -52,6 +52,11 @@ class HRLRDataGenerator:
         obliqueness_range: Max rotation per axis in degrees for obliqueness.
         enable_obliqueness: If True, simulate oblique acquisitions.
         prob_obliqueness: Probability of applying obliqueness per stack.
+        tight_fov: If True, size the LR scan FOV to the brain bbox so the
+            FOV mask covers the air around the brain in HR space (mimics
+            radiographer-sized FOV in real acquisitions).
+        tight_fov_threshold: Intensity threshold for foreground detection.
+        tight_fov_margin: Extra voxels around the brain bbox.
     """
 
     def __init__(
@@ -95,6 +100,10 @@ class HRLRDataGenerator:
         obliqueness_range: float = 15.0,
         enable_obliqueness: bool = True,
         prob_obliqueness: float = 0.5,
+        # Brain-tight FOV (LR scan FOV sized to brain bbox)
+        tight_fov: bool = True,
+        tight_fov_threshold: float = 1e-3,
+        tight_fov_margin: int = 0,
     ):
         if atlas_res is None:
             atlas_res = [1.0, 1.0, 1.0]
@@ -176,6 +185,9 @@ class HRLRDataGenerator:
             obliqueness_range=obliqueness_range,
             enable_obliqueness=enable_obliqueness,
             prob_obliqueness=prob_obliqueness,
+            tight_fov=tight_fov,
+            tight_fov_threshold=tight_fov_threshold,
+            tight_fov_margin=tight_fov_margin,
         )
 
         self.normalizer = ScaleIntensityRangePercentiles(
@@ -215,6 +227,9 @@ class HRLRDataGenerator:
             obliqueness_range=config.fov.obliqueness_range,
             enable_obliqueness=config.fov.enable_obliqueness,
             prob_obliqueness=config.fov.prob_obliqueness,
+            tight_fov=config.fov.tight_fov,
+            tight_fov_threshold=config.fov.tight_fov_threshold,
+            tight_fov_margin=config.fov.tight_fov_margin,
         )
 
     def _normalize_image(self, image: torch.Tensor) -> torch.Tensor:

@@ -147,6 +147,88 @@ class TestMRIArtifactSimulator:
         assert sim._last_rotation_angles[0] is not None
         assert len(sim._last_rotation_angles[0]) == 3  # (rx, ry, rz)
 
+    def test_tight_fov_covers_air_around_brain(self):
+        """With tight_fov=True, the FOV mask should cover the air region
+        outside the brain bbox in HR space — even without obliqueness."""
+        torch.manual_seed(0)
+        vol = torch.zeros(1, 1, 32, 32, 32)
+        vol[:, :, 8:24, 8:24, 8:24] = 1.0  # bright cuboid (the "brain")
+
+        sim_tight = MRIArtifactSimulator(
+            volume_res=[1.0, 1.0, 1.0],
+            target_res=[1.0, 1.0, 1.0],
+            preserve_input_shape=True,
+            return_intermediate=False,
+            enable_obliqueness=False,
+            prob_motion=0.0,
+            prob_spike=0.0,
+            prob_aliasing=0.0,
+            prob_noise=0.0,
+            tight_fov=True,
+        )
+        sim_loose = MRIArtifactSimulator(
+            volume_res=[1.0, 1.0, 1.0],
+            target_res=[1.0, 1.0, 1.0],
+            preserve_input_shape=True,
+            return_intermediate=False,
+            enable_obliqueness=False,
+            prob_motion=0.0,
+            prob_spike=0.0,
+            prob_aliasing=0.0,
+            prob_noise=0.0,
+            tight_fov=False,
+        )
+        acq_res = torch.tensor([[1.0, 1.0, 5.0]])
+        _, fov_tight = sim_tight(vol.clone(), acq_res)
+        _, fov_loose = sim_loose(vol.clone(), acq_res)
+        # tight_fov adds the air-around-brain region to the missing mask
+        assert fov_tight.sum() > fov_loose.sum(), (
+            f"tight_fov should produce more missing voxels "
+            f"({fov_tight.sum().item()} vs {fov_loose.sum().item()})"
+        )
+        # Far corner is air -> tight_fov marks it missing
+        assert fov_tight[0, 0, 0, 0, 0] == 1.0
+        # Middle of the brain bbox is valid in both modes
+        assert fov_tight[0, 0, 16, 16, 16] == 0.0
+
+    def test_tight_fov_with_obliqueness_changes_mask_shape(self):
+        """tight_fov + obliqueness should rotate the brain bbox in HR space,
+        producing a different (but similarly-sized) FOV mask than the
+        axis-aligned case."""
+        vol = torch.zeros(1, 1, 32, 32, 32)
+        vol[:, :, 8:24, 8:24, 8:24] = 1.0
+
+        common = dict(
+            volume_res=[1.0, 1.0, 1.0],
+            target_res=[1.0, 1.0, 1.0],
+            preserve_input_shape=True,
+            return_intermediate=False,
+            prob_motion=0.0,
+            prob_spike=0.0,
+            prob_aliasing=0.0,
+            prob_noise=0.0,
+            tight_fov=True,
+        )
+        torch.manual_seed(0)
+        sim_aligned = MRIArtifactSimulator(enable_obliqueness=False, **common)
+        torch.manual_seed(0)
+        sim_oblique = MRIArtifactSimulator(
+            enable_obliqueness=True, prob_obliqueness=1.0,
+            obliqueness_range=15.0, **common,
+        )
+        acq_res = torch.tensor([[1.0, 1.0, 5.0]])
+        _, fov_aligned = sim_aligned(vol.clone(), acq_res)
+        _, fov_oblique = sim_oblique(vol.clone(), acq_res)
+        # Both should produce non-empty FOV masks covering the air region.
+        assert fov_aligned.sum() > 0
+        assert fov_oblique.sum() > 0
+        # The masks should differ — rotation moves the bbox to different HR voxels.
+        assert not torch.equal(fov_aligned, fov_oblique)
+        # Counts should be in the same order of magnitude (rotation only
+        # changes a small fraction of voxels at ~15 deg).
+        ratio = fov_oblique.sum() / fov_aligned.sum()
+        assert 0.8 < ratio < 1.2
+
     def test_motion_axis_includes_zero(self):
         """Bug fix: motion axis should include axis 0."""
         sim = MRIArtifactSimulator(

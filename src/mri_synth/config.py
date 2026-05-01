@@ -39,6 +39,9 @@ class FOVConfig(BaseModel):
     obliqueness_range: float = 15.0
     enable_obliqueness: bool = True
     prob_obliqueness: float = 0.5
+    tight_fov: bool = True
+    tight_fov_threshold: float = 1e-3
+    tight_fov_margin: int = 0
 
 
 class GenerationConfig(BaseModel):

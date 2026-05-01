@@ -60,3 +60,6 @@ fov:
   obliqueness_range: 5.0            # Max obliqueness rotation per axis in degrees
   enable_obliqueness: true           # Simulate oblique acquisitions (tilted stacks)
   prob_obliqueness: 1.0              # Probability of applying obliqueness per stack
+  tight_fov: true                    # Size LR scan FOV to brain bbox (mimics radiographer-sized FOV in real scans)
+  tight_fov_threshold: 0.001         # Foreground intensity threshold for brain bbox detection
+  tight_fov_margin: 0                # Voxel margin added around the brain bbox

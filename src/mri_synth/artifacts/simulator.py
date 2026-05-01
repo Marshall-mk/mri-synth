@@ -11,6 +11,7 @@ from mri_synth.fov.resampling import (
     affine_resample_3d,
     apply_fov_slice_drop_native,
     build_lr_affine,
+    compute_brain_bbox_support_mask,
     resample_with_fov_mask,
 )
 from mri_synth.physics.slice_profile import SliceProfilePhysics
@@ -53,6 +54,11 @@ class MRIArtifactSimulator(nn.Module):
         obliqueness_range: Maximum rotation per axis in degrees.
         enable_obliqueness: If True, apply random oblique rotations.
         prob_obliqueness: Probability of applying obliqueness per stack.
+        tight_fov: If True, size the LR scan FOV to the brain bounding box
+            so the resulting FOV mask covers the air around the brain in HR
+            space (mimics radiographer-sized FOV in real acquisitions).
+        tight_fov_threshold: Intensity threshold for foreground detection.
+        tight_fov_margin: Extra voxels added around the brain bbox.
     """
 
     def __init__(
@@ -75,6 +81,9 @@ class MRIArtifactSimulator(nn.Module):
         obliqueness_range: float = 15.0,
         enable_obliqueness: bool = True,
         prob_obliqueness: float = 0.5,
+        tight_fov: bool = True,
+        tight_fov_threshold: float = 1e-3,
+        tight_fov_margin: int = 0,
     ):
         super().__init__()
         self.volume_res = torch.tensor(volume_res, dtype=torch.float32)
@@ -93,6 +102,9 @@ class MRIArtifactSimulator(nn.Module):
         self.obliqueness_range = obliqueness_range
         self.enable_obliqueness = enable_obliqueness
         self.prob_obliqueness = prob_obliqueness
+        self.tight_fov = tight_fov
+        self.tight_fov_threshold = tight_fov_threshold
+        self.tight_fov_margin = tight_fov_margin
         self.physics_engine = SliceProfilePhysics(
             profile_type=psf_profile_type, edge_width=psf_edge_width
         )
@@ -150,6 +162,18 @@ class MRIArtifactSimulator(nn.Module):
                 acquisition_res[b] if acquisition_res.ndim > 1 else acquisition_res
             )
             acq_res = acq_res.to(device)
+
+            # Capture HR brain bbox support BEFORE PSF blur so the bbox
+            # tracks the original tissue extent, not the blurred halo.
+            hr_support = (
+                compute_brain_bbox_support_mask(
+                    img,
+                    threshold=self.tight_fov_threshold,
+                    margin=self.tight_fov_margin,
+                )
+                if self.tight_fov
+                else None
+            )
 
             if thickness is not None:
                 thk = thickness[b] if thickness.ndim > 1 else thickness
@@ -230,21 +254,6 @@ class MRIArtifactSimulator(nn.Module):
                 scale_factor = new_size / original_shape[spatial_axis]
                 img = torch.real(torch.fft.ifftn(cropped_fft, dim=(1, 2, 3))) * scale_factor
 
-                # STEP 5: FOV slice drop on native LR
-                fov_drop_applied = (
-                    fov_drop_decisions is not None
-                    and fov_drop_decisions[b].item()
-                    and fov_keep_fractions is not None
-                )
-                if fov_drop_applied:
-                    keep_frac = fov_keep_fractions[b].item()
-                    img = apply_fov_slice_drop_native(
-                        img,
-                        through_plane_axis=downsample_axis,
-                        keep_fraction=keep_frac,
-                        force_both_sides=fov_force_both_sides,
-                    )
-
                 # STEP 6: Affine-based resampling to HR grid + FOV mask
                 target_shape = original_input_shape
                 if self.output_shape is not None:
@@ -262,6 +271,58 @@ class MRIArtifactSimulator(nn.Module):
                 lr_native_shape = tuple(img.shape[1:])
                 resample_mode = self.upsample_mode if self.upsample_mode != "trilinear" else "bilinear"
 
+                # Build axis-aligned LR affine (no rotation) — needed for both
+                # the optional HR->LR support resample and the image branches.
+                lr_affine_aligned = build_lr_affine(
+                    hr_affine=hr_affine,
+                    through_plane_axis=downsample_axis,
+                    lr_spacing_tp=acq_res[downsample_axis].item(),
+                    hr_spacing_tp=vol_res[downsample_axis].item(),
+                    lr_shape=lr_native_shape,
+                    hr_shape=tuple(target_shape),
+                    rotation_angles=None,
+                )
+
+                # Resample HR brain bbox support to axis-aligned LR space so it
+                # tracks the same downsampled grid as ``img``.
+                if hr_support is not None:
+                    lr_support_aligned = affine_resample_3d(
+                        hr_support, hr_affine, lr_affine_aligned,
+                        lr_native_shape, mode="nearest",
+                    )
+                else:
+                    lr_support_aligned = None
+
+                # STEP 5: FOV slice drop on native LR (image + support share
+                # the same drop pattern so the FOV mask reflects the drop).
+                fov_drop_applied = (
+                    fov_drop_decisions is not None
+                    and fov_drop_decisions[b].item()
+                    and fov_keep_fractions is not None
+                )
+                if fov_drop_applied:
+                    keep_frac = fov_keep_fractions[b].item()
+                    drop_from_start = (
+                        None
+                        if fov_force_both_sides
+                        else bool(torch.rand(1).item() < 0.5)
+                    )
+                    img = apply_fov_slice_drop_native(
+                        img,
+                        through_plane_axis=downsample_axis,
+                        keep_fraction=keep_frac,
+                        force_both_sides=fov_force_both_sides,
+                        drop_from_start=drop_from_start,
+                    )
+                    if lr_support_aligned is not None:
+                        lr_support_aligned = apply_fov_slice_drop_native(
+                            lr_support_aligned,
+                            through_plane_axis=downsample_axis,
+                            keep_fraction=keep_frac,
+                            force_both_sides=fov_force_both_sides,
+                            drop_from_start=drop_from_start,
+                        )
+
                 # Sample obliqueness rotation angles (applied randomly per stack)
                 rotation_angles = None
                 if (
@@ -276,17 +337,6 @@ class MRIArtifactSimulator(nn.Module):
                     rotation_angles = (rx, ry, rz)
 
                 self._last_rotation_angles.append(rotation_angles)
-
-                # Build axis-aligned LR affine (no rotation)
-                lr_affine_aligned = build_lr_affine(
-                    hr_affine=hr_affine,
-                    through_plane_axis=downsample_axis,
-                    lr_spacing_tp=acq_res[downsample_axis].item(),
-                    hr_spacing_tp=vol_res[downsample_axis].item(),
-                    lr_shape=lr_native_shape,
-                    hr_shape=tuple(target_shape),
-                    rotation_angles=None,
-                )
 
                 if rotation_angles is not None:
                     # Build oblique LR affine (with rotation)
@@ -305,15 +355,25 @@ class MRIArtifactSimulator(nn.Module):
                         img, lr_affine_aligned, lr_affine_oblique,
                         lr_native_shape, mode=resample_mode,
                     )
+                    if lr_support_aligned is not None:
+                        lr_support_oblique = affine_resample_3d(
+                            lr_support_aligned, lr_affine_aligned, lr_affine_oblique,
+                            lr_native_shape, mode="nearest",
+                        )
+                    else:
+                        lr_support_oblique = None
 
                     # Save oblique native LR (what the scanner would produce)
                     if self.return_intermediate:
                         true_lr_outputs.append(oblique_lr.clone().unsqueeze(0))
 
-                    # Step B: Register oblique LR → HR grid (FOV mask captures obliqueness only)
+                    # Step B: Register oblique LR → HR grid. With tight_fov,
+                    # support_mask makes the FOV mask cover both obliqueness
+                    # corners and the air around the brain bbox.
                     img, fov_mask = resample_with_fov_mask(
                         oblique_lr, lr_affine_oblique, hr_affine,
                         tuple(target_shape), mode=resample_mode,
+                        support_mask=lr_support_oblique,
                     )
                 else:
                     # No obliqueness — direct axis-aligned resampling
@@ -323,6 +383,7 @@ class MRIArtifactSimulator(nn.Module):
                     img, fov_mask = resample_with_fov_mask(
                         img, lr_affine_aligned, hr_affine,
                         tuple(target_shape), mode=resample_mode,
+                        support_mask=lr_support_aligned,
                     )
 
                 fov_mask_outputs.append(fov_mask.unsqueeze(0))

@@ -8,6 +8,7 @@ from mri_synth.fov.resampling import (
     affine_resample_3d,
     apply_fov_slice_drop_native,
     build_lr_affine,
+    compute_brain_bbox_support_mask,
     compute_oblique_fov_mask,
     euler_to_rotation_matrix,
     resample_with_fov_mask,
@@ -214,3 +215,53 @@ class TestApplyFovSliceDropNative:
         vol = torch.ones(1, 20, 20, 20)
         result = apply_fov_slice_drop_native(vol, through_plane_axis=1, keep_fraction=1.0)
         assert torch.allclose(result, vol)
+
+    def test_drop_from_start_shared(self):
+        """Explicit drop_from_start should be deterministic and shared across calls."""
+        vol = torch.ones(1, 20, 20, 20)
+        # drop_from_start=True -> drops the leading slices on axis 0
+        from_start = apply_fov_slice_drop_native(
+            vol, through_plane_axis=0, keep_fraction=0.5,
+            force_both_sides=False, drop_from_start=True,
+        )
+        from_end = apply_fov_slice_drop_native(
+            vol, through_plane_axis=0, keep_fraction=0.5,
+            force_both_sides=False, drop_from_start=False,
+        )
+        assert (from_start[:, :10, :, :] == 0).all()
+        assert (from_start[:, 10:, :, :] == 1).all()
+        assert (from_end[:, :10, :, :] == 1).all()
+        assert (from_end[:, 10:, :, :] == 0).all()
+
+
+class TestComputeBrainBboxSupportMask:
+    def test_bbox_around_bright_cuboid(self):
+        """Mask should be 1 inside the bright cuboid bbox and 0 outside."""
+        vol = torch.zeros(1, 32, 32, 32)
+        vol[:, 8:24, 6:26, 10:22] = 1.0
+        mask = compute_brain_bbox_support_mask(vol, threshold=0.5)
+        assert mask.shape == (1, 32, 32, 32)
+        # Inside bbox -> 1
+        assert (mask[:, 8:24, 6:26, 10:22] == 1).all()
+        # Outside bbox -> 0
+        assert (mask[:, :8, :, :] == 0).all()
+        assert (mask[:, 24:, :, :] == 0).all()
+        assert (mask[:, :, :6, :] == 0).all()
+        assert (mask[:, :, 26:, :] == 0).all()
+        assert (mask[:, :, :, :10] == 0).all()
+        assert (mask[:, :, :, 22:] == 0).all()
+
+    def test_empty_foreground_falls_back_to_ones(self):
+        """When no voxel exceeds threshold, mask should be all-ones."""
+        vol = torch.zeros(1, 16, 16, 16)
+        mask = compute_brain_bbox_support_mask(vol, threshold=0.5)
+        assert (mask == 1).all()
+
+    def test_margin_expands_bbox(self):
+        """Margin should expand the bbox symmetrically (clipped to volume)."""
+        vol = torch.zeros(1, 32, 32, 32)
+        vol[:, 12:20, 12:20, 12:20] = 1.0
+        mask = compute_brain_bbox_support_mask(vol, threshold=0.5, margin=2)
+        # Bbox grew by 2 voxels each side -> 10:22
+        assert (mask[:, 10:22, 10:22, 10:22] == 1).all()
+        assert (mask[:, :10, :, :] == 0).all()

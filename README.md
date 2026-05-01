@@ -242,6 +242,9 @@ For distributed training, call `set_epoch(epoch)` on each rank to keep schedules
 | `obliqueness_range` | `15.0` | Max rotation per axis in degrees |
 | `enable_obliqueness` | `true` | Enable oblique acquisition simulation |
 | `prob_obliqueness` | `0.5` | Probability of applying obliqueness per stack |
+| `tight_fov` | `true` | Size LR scan FOV to brain bbox (mimics radiographer-sized FOV) |
+| `tight_fov_threshold` | `1e-3` | Foreground intensity threshold for brain bbox detection |
+| `tight_fov_margin` | `0` | Voxel margin around the brain bbox |
 
 ### Loading and saving configs
 
@@ -282,9 +285,11 @@ The FOV mask captures the physical difference between the LR stack's native coor
 
 **Obliqueness simulation** makes the mask non-trivial: small random rotations are applied to each LR stack's affine matrix (with configurable probability and range), simulating the real-world tilt of clinical MRI acquisitions relative to the atlas grid. This creates characteristic triangular empty regions at volume corners after resampling.
 
-Without obliqueness, aligned LR and HR grids produce an all-ones mask (no boundary effects). The mask is most useful when:
+**Brain-tight FOV (`tight_fov`)** mirrors what a radiographer does at the scanner: the LR scan FOV is sized around the brain so the slabs barely contain it. We approximate this by computing the axis-aligned bounding box of the foreground in the input HR volume (via MONAI's `generate_spatial_bounding_box`) and using it as the LR scan's support mask. After resampling to the HR grid, HR voxels falling outside the bbox become "new air" and show up in the FOV mask alongside any obliqueness corners. Without `tight_fov`, the FOV mask only captures the obliqueness corners, which understates how much of the HR grid would be missing in a real acquisition.
+
+The mask is most useful when:
 - The LR stack is oblique (rotated) relative to the target grid
-- The LR and HR fields of view differ in size
+- The LR scan FOV is smaller than the HR grid (typical with `tight_fov`)
 - FOV slice dropping removes edge slices before resampling
 
 The network uses the FOV mask in the loss function to ignore artificial zero-padding and focus only on valid data regions.

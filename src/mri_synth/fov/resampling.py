@@ -6,10 +6,12 @@ producing a binary mask of valid data regions.
 """
 
 import math
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn.functional as F
+
+from monai.transforms.utils import generate_spatial_bounding_box
 
 
 def euler_to_rotation_matrix(
@@ -255,6 +257,7 @@ def apply_fov_slice_drop_native(
     through_plane_axis: int,
     keep_fraction: float,
     force_both_sides: bool = True,
+    drop_from_start: Optional[bool] = None,
 ) -> torch.Tensor:
     """Drop slices from a native-resolution LR volume along the through-plane axis.
 
@@ -267,6 +270,9 @@ def apply_fov_slice_drop_native(
         through_plane_axis: Spatial axis index (0=D, 1=H, 2=W).
         keep_fraction: Fraction of slices to keep (0, 1].
         force_both_sides: If True, drop from both ends equally.
+        drop_from_start: When ``force_both_sides=False``, controls which end
+            to drop. ``None`` samples randomly. Pass an explicit boolean to
+            share the same side across paired calls (e.g. image + support).
 
     Returns:
         Volume with dropped slices zeroed out (same shape).
@@ -294,8 +300,9 @@ def apply_fov_slice_drop_native(
             slices_right[axis] = slice(axis_size - drop_right, axis_size)
             output[tuple(slices_right)] = 0
     else:
-        # Drop from one random side
-        drop_from_start = torch.rand(1).item() < 0.5
+        # Drop from one side; sample if not provided so paired calls share it.
+        if drop_from_start is None:
+            drop_from_start = torch.rand(1).item() < 0.5
         slices = [slice(None)] * volume.ndim
         if drop_from_start:
             slices[axis] = slice(0, n_drop)
@@ -304,3 +311,52 @@ def apply_fov_slice_drop_native(
         output[tuple(slices)] = 0
 
     return output
+
+
+def compute_brain_bbox_support_mask(
+    image: torch.Tensor,
+    threshold: float = 1e-3,
+    margin: Union[int, Sequence[int]] = 0,
+) -> torch.Tensor:
+    """Build a bbox-shaped binary support mask around the foreground of ``image``.
+
+    Uses MONAI's :func:`generate_spatial_bounding_box` to find the axis-aligned
+    bounding box of voxels above ``threshold``, then returns a (1, D, H, W)
+    binary mask that is 1 inside the bbox and 0 outside.
+
+    Mimics how a radiographer sizes the LR scan FOV around the brain in real
+    acquisitions: the LR slab tightly contains the brain, so HR voxels falling
+    outside the slab show up as "missing" in the FOV mask after resampling.
+
+    Args:
+        image: Input volume (C, D, H, W) on any device.
+        threshold: Voxel intensity above which is treated as foreground.
+        margin: Extra voxels added to each spatial dim of the bbox. Single int
+            applies to all dims; a sequence of 3 specifies per-axis margins.
+
+    Returns:
+        Binary mask (1, D, H, W) on the same device/dtype as ``image``: 1
+        inside the bbox, 0 outside. If no foreground is found, returns a
+        mask of all-ones (preserves the all-ones-dummy default behaviour).
+    """
+    if image.ndim != 4:
+        raise ValueError(f"Expected (C, D, H, W); got shape {tuple(image.shape)}")
+
+    spatial_shape = image.shape[1:]
+    box_start, box_end = generate_spatial_bounding_box(
+        image, select_fn=lambda x: x > threshold, margin=margin
+    )
+
+    # Empty foreground -> fall back to all-ones (current behaviour).
+    if all(s == 0 for s in box_start) and all(e == 0 for e in box_end):
+        return torch.ones(1, *spatial_shape, dtype=image.dtype, device=image.device)
+
+    mask = torch.zeros(1, *spatial_shape, dtype=image.dtype, device=image.device)
+    d0 = max(0, int(box_start[0]))
+    h0 = max(0, int(box_start[1]))
+    w0 = max(0, int(box_start[2]))
+    d1 = min(spatial_shape[0], int(box_end[0]))
+    h1 = min(spatial_shape[1], int(box_end[1]))
+    w1 = min(spatial_shape[2], int(box_end[2]))
+    mask[:, d0:d1, h0:h1, w0:w1] = 1.0
+    return mask

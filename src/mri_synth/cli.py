@@ -53,6 +53,9 @@ def generate(
     obliqueness_range: float = typer.Option(15.0, "--obliqueness-range", help="Max obliqueness rotation per axis in degrees"),
     enable_obliqueness: bool = typer.Option(True, "--enable-obliqueness/--no-obliqueness", help="Enable oblique acquisition simulation"),
     prob_obliqueness: float = typer.Option(0.5, "--prob-obliqueness", help="Probability of applying obliqueness per stack"),
+    tight_fov: bool = typer.Option(True, "--tight-fov/--no-tight-fov", help="Size LR scan FOV to brain bbox (mimics radiographer-sized FOV)"),
+    tight_fov_threshold: float = typer.Option(1e-3, "--tight-fov-threshold", help="Foreground intensity threshold for brain bbox detection"),
+    tight_fov_margin: int = typer.Option(0, "--tight-fov-margin", help="Voxel margin around the brain bbox"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file (overrides CLI flags)"),
 ):
     """Generate synthetic LR MRI stacks from HR volumes."""
@@ -98,6 +101,9 @@ def generate(
         cfg.fov.obliqueness_range = obliqueness_range
         cfg.fov.enable_obliqueness = enable_obliqueness
         cfg.fov.prob_obliqueness = prob_obliqueness
+        cfg.fov.tight_fov = tight_fov
+        cfg.fov.tight_fov_threshold = tight_fov_threshold
+        cfg.fov.tight_fov_margin = tight_fov_margin
         cfg.save_native_res = save_native_res
 
     # --save-native-res requires return_intermediate to generate true LR stacks
