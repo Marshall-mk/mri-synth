@@ -53,7 +53,7 @@ output/
 | `--num-variations`, `-n` | `1` | Number of variations per volume |
 | `--psf-type` | `trapezoid` | PSF profile: `boxcar`, `gaussian`, `trapezoid` |
 | `--enable-bias-field` / `--no-bias-field` | enabled | Enable bias field corruption |
-| `--enable-fov-sim` / `--no-fov-sim` | enabled | Enable FOV simulation |
+| `--fov-enable` / `--no-fov-enable` | enabled | Enable FOV simulation |
 | `--noise-std` | `0.02` | Noise standard deviation |
 | `--min-res` | `1.0 1.0 1.0` | Minimum resolution per axis (3 values) |
 | `--max-res-aniso` | `9.0 9.0 9.0` | Maximum anisotropic resolution (3 values) |

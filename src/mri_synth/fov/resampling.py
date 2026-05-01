@@ -6,6 +6,7 @@ producing a binary mask of valid data regions.
 """
 
 import math
+import warnings
 from typing import Optional, Sequence, Tuple, Union
 
 import torch
@@ -166,6 +167,9 @@ def affine_resample_3d(
     # Add batch dim to volume: (1, C, D_s, H_s, W_s)
     vol_5d = volume.unsqueeze(0)
 
+    # padding_mode="zeros" is load-bearing: voxels mapped outside the source
+    # volume return 0, which is what makes the dummy/support-mask FOV trick
+    # in resample_with_fov_mask work — those zeros become 1s in the FOV mask.
     resampled = F.grid_sample(
         vol_5d, grid, mode=mode, padding_mode="zeros", align_corners=True
     )
@@ -317,8 +321,15 @@ def compute_brain_bbox_support_mask(
         image, select_fn=lambda x: x > threshold, margin=margin
     )
 
-    # Empty foreground -> fall back to all-ones (current behaviour).
+    # Empty foreground -> fall back to all-ones so we don't silently mask
+    # everything; warn so a misconfigured threshold is visible.
     if all(s == 0 for s in box_start) and all(e == 0 for e in box_end):
+        warnings.warn(
+            f"compute_brain_bbox_support_mask: no voxels above threshold "
+            f"{threshold!r} found; tight_fov is effectively disabled for "
+            f"this volume.",
+            stacklevel=2,
+        )
         return torch.ones(1, *spatial_shape, dtype=image.dtype, device=image.device)
 
     mask = torch.zeros(1, *spatial_shape, dtype=image.dtype, device=image.device)

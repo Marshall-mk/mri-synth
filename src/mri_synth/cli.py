@@ -37,7 +37,7 @@ def generate(
     num_variations: int = typer.Option(1, "--num-variations", "-n", help="Number of variations per volume"),
     psf_type: str = typer.Option("trapezoid", "--psf-type", help="PSF profile type: boxcar, gaussian, trapezoid"),
     enable_bias_field: bool = typer.Option(True, "--enable-bias-field/--no-bias-field", help="Enable bias field corruption"),
-    enable_fov_sim: bool = typer.Option(True, "--enable-fov-sim/--no-fov-sim", help="Enable FOV simulation"),
+    fov_enable: bool = typer.Option(True, "--fov-enable/--no-fov-enable", help="Enable FOV simulation"),
     noise_std: float = typer.Option(0.02, "--noise-std", help="Noise standard deviation"),
     min_res: Optional[List[float]] = typer.Option(None, "--min-res", help="Minimum resolution per axis (3 values)"),
     max_res_aniso: Optional[List[float]] = typer.Option(None, "--max-res-aniso", help="Maximum anisotropic resolution (3 values)"),
@@ -95,7 +95,7 @@ def generate(
         cfg.physics.psf_type = psf_type
         cfg.physics.prob_bias_field = 0.5 if enable_bias_field else 0.0
         cfg.artifacts.noise_std = noise_std
-        cfg.fov.enable = enable_fov_sim
+        cfg.fov.enable = fov_enable
         cfg.fov.obliqueness_range = obliqueness_range
         cfg.fov.enable_obliqueness = enable_obliqueness
         cfg.fov.prob_obliqueness = prob_obliqueness
