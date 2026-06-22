@@ -6,9 +6,11 @@
 
 # --- General ---
 num_stacks: 3                        # Number of orthogonal LR stacks per variation
-num_variations: 1                    # Number of stochastic variations per volume
+num_variations: 3                    # Number of stochastic variations per volume
 device: cpu                          # Torch device: cpu or cuda
 seed: 42                           # Random seed for reproducibility (null = random)
+structural_only: false               # Geometry-only mode: disable bias/noise/intensity/
+                                     #   motion/spike/aliasing; keep only downsampling + FOV
 
 # --- Resolution ---
 atlas_res: [1.0, 1.0, 1.0]          # Input HR voxel spacing in mm (R, A, S)

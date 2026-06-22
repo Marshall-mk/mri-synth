@@ -36,6 +36,19 @@ class GeneratorDataset(torch.utils.data.Dataset):
         return_resolution: bool = False,
         balanced_orientation_combos: bool = False,
     ):
+        # Native-resolution (intermediate) LR stacks have a different spatial
+        # shape per stack and per sample, so they cannot be collated into a
+        # batch by a DataLoader. Reject them here with a clear message instead
+        # of crashing later on a tuple-unpack or collate error. Use the CLI
+        # (--save-native-res) or call generator.generate_paired_data(...)
+        # directly for native-resolution output.
+        if generator.return_intermediate:
+            raise ValueError(
+                "GeneratorDataset does not support generators created with "
+                "return_intermediate=True (native-resolution LR stacks are not "
+                "batch-collatable). Use the CLI or call the generator directly."
+            )
+
         self.base_dataset = base_dataset
         self.generator = generator
         self.return_resolution = return_resolution

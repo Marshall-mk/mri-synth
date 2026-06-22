@@ -79,6 +79,35 @@ class TestCLI:
         )
         assert result.exit_code == 0, result.output
 
+    def test_structural_only_flag(self, tmp_path):
+        nifti_path = tmp_path / "test.nii.gz"
+        _create_test_nifti(nifti_path)
+        output_dir = tmp_path / "output"
+
+        result = runner.invoke(
+            app,
+            [
+                "--input", str(nifti_path),
+                "--output-dir", str(output_dir),
+                "--num-stacks", "3",
+                "--num-variations", "1",
+                "--structural-only",
+                "--seed", "0",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        meta_path = output_dir / "test" / "variation_000" / "metadata.json"
+        assert meta_path.exists()
+        meta = json.loads(meta_path.read_text())
+        assert meta["structural_only"] is True
+        # No appearance corruption may be applied in geometry-only mode.
+        assert not any(meta["applied_artifacts"].values())
+        # Enriched per-stack metadata must be present.
+        for stack in meta["stacks"]:
+            assert "fov_dropped" in stack
+            assert "obliqueness_deg" in stack
+
     def test_nonexistent_input(self, tmp_path):
         result = runner.invoke(
             app,

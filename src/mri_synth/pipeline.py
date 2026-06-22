@@ -35,6 +35,13 @@ class HRLRDataGenerator:
         min_resolution: Minimum resolution per axis.
         max_res_aniso: Maximum anisotropic resolution per axis.
         randomise_res: If True, randomize acquisition resolution.
+        bias_field_std: Std of the bias field coefficients.
+        noise_std: Std of the additive Rician noise.
+        motion_intensity: Intensity of k-space motion ghosting.
+        spike_intensity: Intensity of the RF spike artifact.
+        structural_only: If True, disable every appearance corruption
+            (bias, noise, intensity/gamma, motion, spike, aliasing) so only
+            downsampling and FOV transforms are applied.
         apply_intensity_aug: If True, apply intensity augmentation.
         clip_to_unit_range: If True, clip outputs to [0, 1].
         orientation_dropout_prob: Probability of orientation dropout.
@@ -71,6 +78,13 @@ class HRLRDataGenerator:
         prob_bias_field: float = 0.5,
         prob_noise: float = 0.8,
         fov_augmentation_prob: float = 0.7,
+        # Artifact / corruption intensities
+        bias_field_std: float = 0.3,
+        noise_std: float = 0.02,
+        motion_intensity: float = 0.5,
+        spike_intensity: float = 0.04,
+        # Geometry-only mode (disable all appearance corruptions)
+        structural_only: bool = False,
         # Resolution simulation
         min_resolution: list = None,
         max_res_aniso: list = None,
@@ -112,6 +126,18 @@ class HRLRDataGenerator:
         if max_res_aniso is None:
             max_res_aniso = [9.0, 9.0, 9.0]
 
+        # Geometry-only mode: silence every appearance corruption so only the
+        # structural transforms (downsampling + FOV) remain. Downsampling and
+        # FOV stay under the control of their own flags (randomise_res, fov_*).
+        self.structural_only = structural_only
+        if structural_only:
+            prob_motion = 0.0
+            prob_spike = 0.0
+            prob_aliasing = 0.0
+            prob_bias_field = 0.0
+            prob_noise = 0.0
+            apply_intensity_aug = False
+
         self.atlas_res = atlas_res
         self.target_res = target_res
         self.output_shape = output_shape
@@ -149,9 +175,10 @@ class HRLRDataGenerator:
                 max_res_aniso=max_res_aniso,
             )
 
-        # Bias field
+        # Bias field. prob=1.0 because gating is done per-patient in
+        # generate_paired_data via self.prob_bias_field.
         self.bias = BiasFieldCorruption(
-            bias_field_std=0.3, bias_scale=0.025, prob=1.0
+            bias_field_std=bias_field_std, bias_scale=0.025, prob=1.0
         )
 
         # Intensity augmentation
@@ -172,8 +199,9 @@ class HRLRDataGenerator:
             prob_spike=prob_spike,
             prob_aliasing=prob_aliasing,
             prob_noise=prob_noise,
-            noise_std=0.02,
-            motion_intensity=0.5,
+            noise_std=noise_std,
+            motion_intensity=motion_intensity,
+            spike_intensity=spike_intensity,
             upsample_mode=upsample_mode,
             return_intermediate=return_intermediate,
             psf_profile_type=psf_profile_type,
@@ -202,6 +230,11 @@ class HRLRDataGenerator:
             prob_aliasing=config.artifacts.prob_aliasing,
             prob_bias_field=config.physics.prob_bias_field,
             prob_noise=config.artifacts.prob_noise,
+            bias_field_std=config.physics.bias_field_std,
+            noise_std=config.artifacts.noise_std,
+            motion_intensity=config.artifacts.motion_intensity,
+            spike_intensity=config.artifacts.spike_intensity,
+            structural_only=config.structural_only,
             fov_augmentation_prob=config.fov.prob if config.fov.enable else 0.0,
             min_resolution=config.min_resolution,
             max_res_aniso=config.max_res_aniso,
@@ -459,6 +492,22 @@ class HRLRDataGenerator:
             batch_size, device
         )
 
+        # Record the sampled decisions so callers (e.g. the CLI) can log which
+        # corruptions were actually applied. Per-patient flags are shared
+        # across stacks; FOV drop is per-stack.
+        self._last_decisions = {
+            "bias_field": apply_bias_field,
+            "intensity_aug": self.apply_intensity_aug,
+            "motion": apply_motion,
+            "spike": apply_spike,
+            "aliasing": apply_aliasing,
+            "noise": apply_noise,
+            "motion_axis": motion_axis,
+            "aliasing_axis": aliasing_axis,
+            "fov_drop": fov_drop_decisions,
+            "fov_keep_fraction": fov_keep_fractions,
+        }
+
         lr_stacks = []
         true_lr_stacks = []
         fov_masks = []
@@ -471,36 +520,24 @@ class HRLRDataGenerator:
             resolution = resolutions[stack_idx]
             thickness = thicknesses[stack_idx]
 
+            sim_out = self.artifact_simulator(
+                lr_images,
+                resolution,
+                thickness,
+                enable_motion=apply_motion,
+                enable_spike=apply_spike,
+                enable_aliasing=apply_aliasing,
+                enable_noise=apply_noise,
+                motion_axis=motion_axis,
+                aliasing_axis=aliasing_axis,
+                fov_drop_decisions=fov_drop_decisions[stack_idx],
+                fov_keep_fractions=fov_keep_fractions[stack_idx],
+                fov_force_both_sides=self.fov_force_both_sides,
+            )
             if self.return_intermediate:
-                lr_images, stack_fov_masks, true_lr_images = self.artifact_simulator(
-                    lr_images,
-                    resolution,
-                    thickness,
-                    enable_motion=apply_motion,
-                    enable_spike=apply_spike,
-                    enable_aliasing=apply_aliasing,
-                    enable_noise=apply_noise,
-                    motion_axis=motion_axis,
-                    aliasing_axis=aliasing_axis,
-                    fov_drop_decisions=fov_drop_decisions[stack_idx],
-                    fov_keep_fractions=fov_keep_fractions[stack_idx],
-                    fov_force_both_sides=self.fov_force_both_sides,
-                )
+                lr_images, stack_fov_masks, true_lr_images = sim_out
             else:
-                lr_images, stack_fov_masks = self.artifact_simulator(
-                    lr_images,
-                    resolution,
-                    thickness,
-                    enable_motion=apply_motion,
-                    enable_spike=apply_spike,
-                    enable_aliasing=apply_aliasing,
-                    enable_noise=apply_noise,
-                    motion_axis=motion_axis,
-                    aliasing_axis=aliasing_axis,
-                    fov_drop_decisions=fov_drop_decisions[stack_idx],
-                    fov_keep_fractions=fov_keep_fractions[stack_idx],
-                    fov_force_both_sides=self.fov_force_both_sides,
-                )
+                lr_images, stack_fov_masks = sim_out
 
             self._rotation_angles_per_stack.append(
                 self.artifact_simulator._last_rotation_angles

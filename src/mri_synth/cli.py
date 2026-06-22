@@ -46,6 +46,7 @@ def generate(
     save_native_res: bool = typer.Option(False, "--save-native-res/--no-save-native-res", help="Save native-resolution LR stacks (pre-upsample)"),
     clip_to_unit_range: bool = typer.Option(True, "--clip-to-unit-range/--no-clip-to-unit-range", help="Clip outputs to [0, 1]"),
     apply_intensity_aug: bool = typer.Option(False, "--apply-intensity-aug/--no-intensity-aug", help="Apply intensity augmentation"),
+    structural_only: bool = typer.Option(False, "--structural-only/--no-structural-only", help="Geometry-only mode: disable bias/noise/intensity/motion/spike/aliasing, keep only downsampling + FOV"),
     randomise_res: bool = typer.Option(True, "--randomise-res/--no-randomise-res", help="Randomize acquisition resolution"),
     return_intermediate: bool = typer.Option(False, "--return-intermediate/--no-return-intermediate", help="Return native-resolution LR (pre-upsample)"),
     upsample_mode: str = typer.Option("trilinear", "--upsample-mode", help="Interpolation mode for upsampling"),
@@ -58,6 +59,8 @@ def generate(
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="YAML config file (overrides CLI flags)"),
 ):
     """Generate synthetic LR MRI stacks from HR volumes."""
+    import math
+
     import torch
 
     from mri_synth.config import GenerationConfig
@@ -88,6 +91,7 @@ def generate(
             seed=seed,
             clip_to_unit_range=clip_to_unit_range,
             apply_intensity_aug=apply_intensity_aug,
+            structural_only=structural_only,
             randomise_res=randomise_res,
             return_intermediate=return_intermediate,
             upsample_mode=upsample_mode,
@@ -147,7 +151,21 @@ def generate(
             if var_idx == 0:
                 save_volume(hr_aug.squeeze(0), dirs["volume_dir"] / "hr.nii.gz", affine)
 
-            var_meta = {"stacks": []}
+            # Record which corruptions were actually applied for this variation.
+            # Per-patient flags are shared across stacks (batch index 0 here).
+            decisions = generator._last_decisions
+            var_meta = {
+                "structural_only": cfg.structural_only,
+                "applied_artifacts": {
+                    "bias_field": bool(decisions["bias_field"][0].item()),
+                    "intensity_aug": bool(decisions["intensity_aug"]),
+                    "motion": bool(decisions["motion"][0].item()),
+                    "spike": bool(decisions["spike"][0].item()),
+                    "aliasing": bool(decisions["aliasing"][0].item()),
+                    "noise": bool(decisions["noise"][0].item()),
+                },
+                "stacks": [],
+            }
             for s_idx in range(cfg.num_stacks):
                 stack_file = get_stack_filename(s_idx)
                 save_volume(
@@ -161,6 +179,23 @@ def generate(
                     "resolution": resolutions[s_idx].squeeze(0).tolist(),
                     "thickness": thicknesses[s_idx].squeeze(0).tolist(),
                 }
+
+                # Per-stack FOV slice-drop decision.
+                fov_dropped = bool(decisions["fov_drop"][s_idx][0].item())
+                stack_meta["fov_dropped"] = fov_dropped
+                stack_meta["fov_keep_fraction"] = (
+                    round(decisions["fov_keep_fraction"][s_idx][0].item(), 4)
+                    if fov_dropped
+                    else None
+                )
+
+                # Per-stack obliqueness rotation (radians -> degrees), if any.
+                rot = generator._rotation_angles_per_stack[s_idx][0]
+                stack_meta["obliqueness_deg"] = (
+                    [round(math.degrees(a), 3) for a in rot]
+                    if rot is not None
+                    else None
+                )
 
                 fov_mask_file = get_fov_mask_filename(s_idx)
                 save_volume(

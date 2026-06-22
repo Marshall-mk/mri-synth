@@ -49,6 +49,15 @@ class GenerationConfig(BaseModel):
 
     num_stacks: int = 3
     num_variations: int = 1
+    structural_only: bool = Field(
+        default=False,
+        description=(
+            "Geometry-only mode: disable all appearance corruptions "
+            "(bias field, noise, intensity/gamma, motion, spike, aliasing) "
+            "and keep only the structural transforms (resolution "
+            "downsampling and FOV cropping/obliqueness/tight-FOV)."
+        ),
+    )
     atlas_res: List[float] = Field(default_factory=lambda: [1.0, 1.0, 1.0])
     target_res: List[float] = Field(default_factory=lambda: [1.0, 1.0, 1.0])
     min_resolution: List[float] = Field(default_factory=lambda: [1.0, 1.0, 1.0])

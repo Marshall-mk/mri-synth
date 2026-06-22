@@ -66,6 +66,7 @@ output/
 | `--save-native-res` / `--no-save-native-res` | disabled | Save native-resolution LR stacks (pre-upsample) |
 | `--clip-to-unit-range` / `--no-clip-to-unit-range` | enabled | Clip outputs to [0, 1] |
 | `--apply-intensity-aug` / `--no-intensity-aug` | disabled | Apply intensity augmentation |
+| `--structural-only` / `--no-structural-only` | disabled | Geometry-only mode: disable bias/noise/intensity/motion/spike/aliasing, keep only downsampling + FOV |
 | `--randomise-res` / `--no-randomise-res` | enabled | Randomize acquisition resolution |
 | `--return-intermediate` / `--no-return-intermediate` | disabled | Return native-resolution LR (pre-upsample) |
 | `--upsample-mode` | `trilinear` | Interpolation mode for upsampling |
@@ -196,6 +197,7 @@ For distributed training, call `set_epoch(epoch)` on each rank to keep schedules
 |---|---|---|
 | `num_stacks` | `3` | Number of LR stacks per sample |
 | `num_variations` | `1` | Number of variations per volume (CLI mode) |
+| `structural_only` | `false` | Geometry-only mode: disable all appearance corruptions, keep only downsampling + FOV |
 | `atlas_res` | `[1, 1, 1]` | Resolution of input HR images (mm) |
 | `target_res` | `[1, 1, 1]` | Target output resolution (mm) |
 | `min_resolution` | `[1, 1, 1]` | Minimum in-plane resolution (mm) |
@@ -249,6 +251,42 @@ For distributed training, call `set_epoch(epoch)` on each rank to keep schedules
 | `tight_fov` | `true` | Size LR scan FOV to brain bbox (mimics radiographer-sized FOV) |
 | `tight_fov_threshold` | `1e-3` | Foreground intensity threshold for brain bbox detection |
 | `tight_fov_margin` | `0` | Voxel margin around the brain bbox |
+
+### Geometry-only mode (`structural_only`)
+
+Setting `structural_only: true` (or `--structural-only`) disables every
+**appearance** corruption — bias field, additive noise, intensity/gamma
+augmentation, and the k-space artifacts (motion ghosting, RF spikes,
+aliasing) — leaving only the **structural** transforms: resolution
+downsampling and FOV cropping (slice drop, obliqueness, tight-FOV). Use it
+when you want LR/HR pairs that differ only in geometry/resolution, with no
+intensity changes between the HR and the (upsampled) LR. Downsampling and FOV
+remain governed by their own flags (`randomise_res`, `fov.*`).
+
+### Per-variation metadata
+
+Each `variation_xxx/metadata.json` records what was actually sampled:
+
+```json
+{
+  "structural_only": false,
+  "applied_artifacts": {
+    "bias_field": true, "intensity_aug": false, "motion": false,
+    "spike": false, "aliasing": false, "noise": true
+  },
+  "stacks": [
+    {
+      "file": "stack_0_axial.nii.gz",
+      "resolution": [1.0, 1.0, 4.7],
+      "thickness": [1.0, 1.0, 4.7],
+      "fov_dropped": true,
+      "fov_keep_fraction": 0.55,
+      "obliqueness_deg": [3.2, -1.1, 8.4],
+      "fov_mask_file": "stack_0_axial_fov_mask.nii.gz"
+    }
+  ]
+}
+```
 
 ### Loading and saving configs
 

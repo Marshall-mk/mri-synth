@@ -199,6 +199,68 @@ class TestHRLRDataGenerator:
         any_has_ones = any(1.0 in mask for mask in fov_masks)
         assert any_has_ones, "Large obliqueness should produce ones (missing voxels) in FOV masks"
 
+    def test_from_config_wires_artifact_intensities(self):
+        """noise_std / motion_intensity / spike_intensity / bias_field_std
+        from config must reach the simulator (regression: were hardcoded)."""
+        cfg = GenerationConfig()
+        cfg.artifacts.noise_std = 0.123
+        cfg.artifacts.motion_intensity = 0.456
+        cfg.artifacts.spike_intensity = 0.789
+        cfg.physics.bias_field_std = 0.321
+        gen = HRLRDataGenerator.from_config(cfg)
+        assert gen.artifact_simulator.noise_std == 0.123
+        assert gen.artifact_simulator.motion_intensity == 0.456
+        assert gen.artifact_simulator.spike_intensity == 0.789
+        assert gen.bias.bias_field_std == 0.321
+
+    def test_structural_only_zeroes_appearance_probs(self):
+        """structural_only must silence every appearance corruption."""
+        gen = HRLRDataGenerator(
+            structural_only=True,
+            prob_motion=1.0,
+            prob_spike=1.0,
+            prob_aliasing=1.0,
+            prob_noise=1.0,
+            prob_bias_field=1.0,
+            apply_intensity_aug=True,
+        )
+        assert gen.prob_bias_field == 0.0
+        assert gen.apply_intensity_aug is False
+        assert gen.artifact_simulator.prob_motion == 0.0
+        assert gen.artifact_simulator.prob_spike == 0.0
+        assert gen.artifact_simulator.prob_aliasing == 0.0
+        assert gen.artifact_simulator.prob_noise == 0.0
+
+    def test_structural_only_no_artifacts_applied(self, synthetic_volume):
+        """With structural_only, no appearance corruption is ever sampled,
+        even when every probability is forced to 1.0."""
+        gen = HRLRDataGenerator(
+            num_stacks=3,
+            structural_only=True,
+            prob_motion=1.0,
+            prob_spike=1.0,
+            prob_aliasing=1.0,
+            prob_noise=1.0,
+            prob_bias_field=1.0,
+            apply_intensity_aug=True,
+            fov_augmentation_prob=0.0,
+            enable_obliqueness=False,
+        )
+        gen.generate_paired_data(synthetic_volume)
+        d = gen._last_decisions
+        assert d["intensity_aug"] is False
+        for key in ("bias_field", "motion", "spike", "aliasing", "noise"):
+            assert not bool(d[key].any()), f"{key} should never be applied"
+
+    def test_structural_only_from_config(self, synthetic_volume):
+        """structural_only must propagate through from_config."""
+        cfg = GenerationConfig(structural_only=True)
+        cfg.artifacts.prob_noise = 1.0
+        cfg.physics.prob_bias_field = 1.0
+        gen = HRLRDataGenerator.from_config(cfg)
+        assert gen.prob_bias_field == 0.0
+        assert gen.artifact_simulator.prob_noise == 0.0
+
     def test_fov_masks_with_return_resolution(self, synthetic_volume):
         """FOV masks should be returned with return_resolution=True."""
         gen = HRLRDataGenerator(
