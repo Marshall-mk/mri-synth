@@ -16,11 +16,19 @@ def load_volume(path: Union[str, Path]) -> Tuple[torch.Tensor, np.ndarray, nib.N
     Args:
         path: Path to a .nii or .nii.gz file.
 
+    The volume is reoriented to canonical RAS array order so that array
+    axes map to (R, A, S) = (axis 0, axis 1, axis 2). The rest of the
+    pipeline (orthogonal resolution assignment, axial/coronal/sagittal
+    naming) assumes this convention; without reorientation, inputs stored
+    in any other orientation (LIA, ASR, RPI, ...) get the wrong through-
+    plane axis and the stacks come out permuted.
+
     Returns:
         Tuple of (tensor, affine, header) where tensor is (C, D, H, W).
     """
     path = Path(path)
     nii = nib.load(str(path))
+    nii = nib.as_closest_canonical(nii)  # reorient to RAS
     data = np.asarray(nii.dataobj, dtype=np.float32)
 
     # Add channel dim if needed
