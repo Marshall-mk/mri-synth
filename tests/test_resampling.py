@@ -38,13 +38,13 @@ class TestBuildLrAffine:
         lr_affine = build_lr_affine(
             hr_affine,
             through_plane_axis=2,
-            lr_spacing_tp=5.0,
+            lr_spacing_tp=4.0,
             hr_spacing_tp=1.0,
-            lr_shape=(32, 32, 6),
+            lr_shape=(32, 32, 8),
             hr_shape=(32, 32, 32),
         )
-        # Through-plane column (axis 2) should be scaled by 5
-        assert abs(lr_affine[2, 2].item() - 5.0) < 1e-5
+        # Through-plane column (axis 2) should be scaled by 4
+        assert abs(lr_affine[2, 2].item() - 4.0) < 1e-5
         # In-plane columns should be unchanged
         assert abs(lr_affine[0, 0].item() - 1.0) < 1e-5
         assert abs(lr_affine[1, 1].item() - 1.0) < 1e-5
@@ -78,14 +78,14 @@ class TestAffineResample3d:
 class TestResampleWithFovMask:
     def test_fov_mask_binary(self):
         """FOV mask should be binary (0 or 1)."""
-        lr_vol = torch.rand(1, 32, 32, 6)
+        lr_vol = torch.rand(1, 32, 32, 8)
         hr_affine = torch.diag(torch.tensor([1.0, 1.0, 1.0, 1.0]))
         lr_affine = build_lr_affine(
             hr_affine,
             through_plane_axis=2,
-            lr_spacing_tp=5.0,
+            lr_spacing_tp=4.0,
             hr_spacing_tp=1.0,
-            lr_shape=(32, 32, 6),
+            lr_shape=(32, 32, 8),
             hr_shape=(32, 32, 32),
         )
         _, fov_mask = resample_with_fov_mask(lr_vol, lr_affine, hr_affine, (32, 32, 32))
@@ -94,33 +94,33 @@ class TestResampleWithFovMask:
 
     def test_fov_mask_mostly_zero_aligned(self):
         """Axis-aligned LR->HR should have mostly zeros (valid) with some ones at edges."""
-        lr_vol = torch.rand(1, 32, 32, 6)
+        lr_vol = torch.rand(1, 32, 32, 8)
         hr_affine = torch.diag(torch.tensor([1.0, 1.0, 1.0, 1.0]))
         lr_affine = build_lr_affine(
             hr_affine,
             through_plane_axis=2,
-            lr_spacing_tp=5.0,
+            lr_spacing_tp=4.0,
             hr_spacing_tp=1.0,
-            lr_shape=(32, 32, 6),
+            lr_shape=(32, 32, 8),
             hr_shape=(32, 32, 32),
             rotation_angles=None,
         )
         _, fov_mask = resample_with_fov_mask(lr_vol, lr_affine, hr_affine, (32, 32, 32))
-        # Center-aligned, the LR FOV covers 6*5=30mm vs HR 32*1=32mm
+        # Center-aligned, the LR FOV covers 8*4=32mm vs HR 32*1=32mm
         # Edges of HR grid outside LR FOV -> fov_mask=1 (missing)
         # Most of the volume should be 0 (valid)
         assert (fov_mask == 0).sum() > (fov_mask == 1).sum()
 
     def test_fov_mask_has_ones_with_rotation(self):
         """Oblique LR should produce ones (missing) at corners."""
-        lr_vol = torch.rand(1, 32, 32, 6)
+        lr_vol = torch.rand(1, 32, 32, 8)
         hr_affine = torch.diag(torch.tensor([1.0, 1.0, 1.0, 1.0]))
         lr_affine = build_lr_affine(
             hr_affine,
             through_plane_axis=2,
-            lr_spacing_tp=5.0,
+            lr_spacing_tp=4.0,
             hr_spacing_tp=1.0,
-            lr_shape=(32, 32, 6),
+            lr_shape=(32, 32, 8),
             hr_shape=(32, 32, 32),
             rotation_angles=(0.3, 0.3, 0.3),
         )
@@ -129,21 +129,21 @@ class TestResampleWithFovMask:
 
     def test_support_mask_produces_ones_where_dropped(self):
         """Support mask with zeros should produce 1s (missing) in FOV mask at corresponding HR positions."""
-        lr_vol = torch.rand(1, 32, 32, 6)
+        lr_vol = torch.rand(1, 32, 32, 8)
         hr_affine = torch.diag(torch.tensor([1.0, 1.0, 1.0, 1.0]))
         lr_affine = build_lr_affine(
             hr_affine,
             through_plane_axis=2,
-            lr_spacing_tp=5.0,
+            lr_spacing_tp=4.0,
             hr_spacing_tp=1.0,
-            lr_shape=(32, 32, 6),
+            lr_shape=(32, 32, 8),
             hr_shape=(32, 32, 32),
             rotation_angles=None,
         )
-        # Support mask: drop first and last 2 slices (keep middle 2 of 6)
-        support_mask = torch.ones(1, 32, 32, 6)
-        support_mask[:, :, :, :2] = 0.0
-        support_mask[:, :, :, 4:] = 0.0
+        # Support mask: drop first and last 3 slices (keep middle 2 of 8)
+        support_mask = torch.ones(1, 32, 32, 8)
+        support_mask[:, :, :, :3] = 0.0
+        support_mask[:, :, :, 5:] = 0.0
 
         _, fov_mask_with_support = resample_with_fov_mask(
             lr_vol, lr_affine, hr_affine, (32, 32, 32), support_mask=support_mask,

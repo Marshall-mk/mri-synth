@@ -56,18 +56,31 @@ def build_lr_affine(
 ) -> torch.Tensor:
     """Build the LR native-space affine matrix.
 
-    Starts from the HR affine, scales the through-plane column to reflect
-    the LR voxel spacing, optionally applies a rotation (obliqueness), and
-    adjusts the translation so the LR and HR FOV centers coincide in world
-    space.
+    Starts from the HR affine, scales the through-plane column to reflect the
+    LR voxel spacing, anchors the LR grid onto the HR grid, and optionally
+    applies a rotation (obliqueness) about the LR FOV centre.
+
+    **Grid placement.** The LR and HR FOV centres are made to coincide, which
+    matches the centred sampling grid that
+    ``MRIArtifactSimulator._fft_downsample`` produces.
+
+    ``lr_spacing_tp`` must be the *effective* spacing actually realised by the
+    k-space crop, ``hr_spacing_tp * hr_shape[tp] / lr_shape[tp]``, not the
+    nominal resolution that was requested. The two differ because the crop
+    rounds to a whole number of samples (a requested 4.7 mm over 128 slices
+    yields 27 slices, i.e. 4.741 mm); encoding the nominal value instead
+    stretches the stack against the HR grid. A mismatch is reported as a
+    warning.
 
     Args:
         hr_affine: 4x4 HR grid affine matrix.
         through_plane_axis: Index (0, 1, or 2) of the through-plane axis.
-        lr_spacing_tp: LR voxel spacing along the through-plane axis (mm).
+        lr_spacing_tp: Effective LR voxel spacing along the through-plane
+            axis (mm).
         hr_spacing_tp: HR voxel spacing along the through-plane axis (mm).
         lr_shape: Spatial shape (D, H, W) of the native LR volume.
-        hr_shape: Spatial shape (D, H, W) of the HR target grid.
+        hr_shape: Spatial shape (D, H, W) of the HR target grid. Used to
+            verify that ``lr_spacing_tp`` matches the realised sampling.
         rotation_angles: Optional (rx, ry, rz) in radians for obliqueness.
 
     Returns:
@@ -80,7 +93,22 @@ def build_lr_affine(
     scale = lr_spacing_tp / hr_spacing_tp
     T_lr[:3, through_plane_axis] = T_lr[:3, through_plane_axis] * scale
 
-    # Apply rotation (obliqueness)
+    # Guard rail: the affine only describes the data if the spacing it encodes
+    # is the one the k-space crop actually realised.
+    realised = hr_shape[through_plane_axis] / lr_shape[through_plane_axis]
+    if abs(realised - scale) > 1e-3 * max(1.0, realised):
+        warnings.warn(
+            f"build_lr_affine: lr_spacing_tp implies a through-plane scale of "
+            f"{scale:.4f} but the LR/HR shapes along axis {through_plane_axis} "
+            f"imply {realised:.4f}. The affine will not describe where the LR "
+            f"samples actually lie, misregistering the stack against the HR "
+            f"grid. Pass the effective spacing "
+            f"(hr_spacing_tp * hr_shape[tp] / lr_shape[tp]).",
+            stacklevel=2,
+        )
+
+    # Apply rotation (obliqueness). Combined with the centre alignment below
+    # this rotates the stack about its own FOV centre.
     if rotation_angles is not None:
         rx, ry, rz = rotation_angles
         R = euler_to_rotation_matrix(rx, ry, rz, device=device)
@@ -128,7 +156,6 @@ def affine_resample_3d(
         Resampled volume (C, *target_shape).
     """
     device = volume.device
-    C = volume.shape[0]
     src_shape = volume.shape[1:]  # (D_s, H_s, W_s)
     tgt_D, tgt_H, tgt_W = target_shape
 
@@ -255,36 +282,58 @@ def apply_fov_slice_drop_native(
     # spatial axis in (C, D, H, W) is offset by 1
     axis = through_plane_axis + 1
     axis_size = volume.shape[axis]
-    n_keep = max(1, int(axis_size * keep_fraction))
-    n_drop = axis_size - n_keep
 
-    if n_drop == 0:
+    # Drop from one side; sample if not provided so paired calls share it.
+    if drop_from_start is None and not force_both_sides:
+        drop_from_start = torch.rand(1).item() < 0.5
+
+    lo, hi = kept_slice_bounds(
+        axis_size, keep_fraction, force_both_sides, drop_from_start
+    )
+    if lo == 0 and hi == axis_size:
         return output
 
-    if force_both_sides:
-        drop_left = n_drop // 2
-        drop_right = n_drop - drop_left
-        # Zero out left side
-        slices_left = [slice(None)] * volume.ndim
-        slices_left[axis] = slice(0, drop_left)
-        output[tuple(slices_left)] = 0
-        # Zero out right side
-        if drop_right > 0:
-            slices_right = [slice(None)] * volume.ndim
-            slices_right[axis] = slice(axis_size - drop_right, axis_size)
-            output[tuple(slices_right)] = 0
-    else:
-        # Drop from one side; sample if not provided so paired calls share it.
-        if drop_from_start is None:
-            drop_from_start = torch.rand(1).item() < 0.5
+    if lo > 0:
         slices = [slice(None)] * volume.ndim
-        if drop_from_start:
-            slices[axis] = slice(0, n_drop)
-        else:
-            slices[axis] = slice(axis_size - n_drop, axis_size)
+        slices[axis] = slice(0, lo)
+        output[tuple(slices)] = 0
+    if hi < axis_size:
+        slices = [slice(None)] * volume.ndim
+        slices[axis] = slice(hi, axis_size)
         output[tuple(slices)] = 0
 
     return output
+
+
+def kept_slice_bounds(
+    n_slices: int,
+    keep_fraction: float,
+    force_both_sides: bool = True,
+    drop_from_start: Optional[bool] = None,
+) -> Tuple[int, int]:
+    """Which native LR slices ``apply_fov_slice_drop_native`` keeps: ``[lo, hi)``.
+
+    Factored out so coverage prediction and the drop itself cannot drift apart.
+
+    Args:
+        n_slices: Number of slices along the through-plane axis.
+        keep_fraction: Fraction of slices to keep (0, 1].
+        force_both_sides: If True, the kept slab stays centred.
+        drop_from_start: When one-sided, True drops the leading slices.
+
+    Returns:
+        ``(lo, hi)`` half-open range of kept slice indices.
+    """
+    n_keep = max(1, int(n_slices * keep_fraction))
+    n_drop = n_slices - n_keep
+    if n_drop <= 0:
+        return 0, n_slices
+    if force_both_sides:
+        drop_left = n_drop // 2
+        return drop_left, n_slices - (n_drop - drop_left)
+    if drop_from_start:
+        return n_drop, n_slices
+    return 0, n_keep
 
 
 def compute_brain_bbox_support_mask(
@@ -341,3 +390,53 @@ def compute_brain_bbox_support_mask(
     w1 = min(spatial_shape[2], int(box_end[2]))
     mask[:, d0:d1, h0:h1, w0:w1] = 1.0
     return mask
+
+
+def compute_shared_support_mask(
+    images: Sequence[torch.Tensor],
+    threshold: float = 1e-3,
+    margin: Union[int, Sequence[int]] = 0,
+) -> torch.Tensor:
+    """Build one tight-FOV support mask covering the foreground of every image.
+
+    A radiographer prescribes a single FOV for a session, so the T1, T2 and
+    FLAIR of one subject share it. Deriving the bbox per volume instead would
+    give each contrast a slightly different box — different tissues are bright
+    in different sequences — and their FOV masks would disagree even though the
+    stacks were meant to be identical in geometry.
+
+    Takes the union of the per-image bounding boxes, so the shared FOV contains
+    every contrast's foreground.
+
+    Args:
+        images: Non-empty sequence of (C, D, H, W) volumes sharing one grid.
+        threshold: Voxel intensity above which is treated as foreground.
+        margin: Extra voxels added to each spatial dim of each bbox.
+
+    Returns:
+        Binary mask (1, D, H, W): 1 inside the shared bbox, 0 outside.
+
+    Raises:
+        ValueError: If ``images`` is empty or the volumes disagree in shape.
+    """
+    images = list(images)
+    if not images:
+        raise ValueError("compute_shared_support_mask requires at least one image.")
+
+    shapes = {tuple(img.shape[1:]) for img in images}
+    if len(shapes) > 1:
+        raise ValueError(
+            f"All volumes must share a spatial grid to share a FOV; got {shapes}."
+        )
+
+    masks = [
+        compute_brain_bbox_support_mask(img, threshold=threshold, margin=margin)
+        for img in images
+    ]
+    union = masks[0].clone()
+    for m in masks[1:]:
+        union = torch.maximum(union, m.to(union.device))
+
+    # The union of boxes is not itself a box; re-fit one so the shared FOV
+    # stays the rectangular slab a scanner would actually prescribe.
+    return compute_brain_bbox_support_mask(union, threshold=0.5, margin=0)

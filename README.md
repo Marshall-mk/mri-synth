@@ -72,7 +72,62 @@ output/
 | `--upsample-mode` | `trilinear` | Interpolation mode for upsampling |
 | `--device` | `cpu` | Device: `cpu` or `cuda` |
 | `--seed` | `None` | Random seed for reproducibility |
+| `--multi-contrast` / `--no-multi-contrast` | disabled | Treat input as co-registered contrasts per subject, sharing one acquisition geometry |
 | `--config`, `-c` | `None` | YAML config file (overrides CLI flags) |
+
+### Multi-contrast / multi-sequence input
+
+With `--multi-contrast`, several co-registered volumes of the same subject (T1,
+T2, FLAIR, …) are simulated under **one shared acquisition geometry**: stack `i`
+has the same orientation, slice thickness, FOV coverage fraction, dropped slab
+and oblique tilt in every contrast. The T1 and T2 sagittal stacks then describe
+the same physical acquisition, which is what a joint reconstruction needs.
+
+Two input layouts are accepted:
+
+```
+# one group per subject subdirectory
+input/sub-01/{T1,T2,FLAIR}.nii.gz
+input/sub-02/{T1,T2}.nii.gz
+
+# or a single subject whose contrasts sit directly in the directory
+input/{T1,T2,FLAIR}.nii.gz
+```
+
+```bash
+mri-synth -i /data/subjects/ -o output/ --multi-contrast --structural-only -n 3
+```
+
+Output:
+
+```
+output/
+  sub-01/
+    hr_T1.nii.gz
+    hr_T2.nii.gz
+    variation_000/
+      T1/
+        stack_0_axial.nii.gz
+        stack_0_axial_fov_mask.nii.gz
+      T2/
+        stack_0_axial.nii.gz
+        stack_0_axial_fov_mask.nii.gz
+      metadata.json          # shared geometry + per-contrast entries
+  manifest.json
+```
+
+Notes:
+
+- Contrasts must share a voxel grid. A subject whose volumes disagree in shape
+  is skipped with a message — register them onto a common grid first.
+- The tight-FOV bounding box is computed **once** from all contrasts together
+  (the union of their foreground boxes). A box derived per contrast would differ
+  — different tissues are bright in different sequences — and the FOV masks
+  would disagree despite the geometry being identical. As a result the FOV masks
+  are bit-identical across contrasts.
+- Appearance corruptions (bias field, noise, gamma) are re-sampled per contrast,
+  since real repeat acquisitions share a prescription, not a noise realisation.
+  Under `--structural-only` none of them apply anyway.
 
 ### Using a YAML config
 
@@ -176,6 +231,31 @@ hr_batch = torch.randn(2, 1, 128, 128, 128)  # (B, C, D, H, W)
 lr_stacks, hr_aug, orientation_mask, fov_masks = generator.generate_paired_data(hr_batch)
 ```
 
+### Sharing one acquisition geometry across volumes
+
+`sample_structural_plan()` draws everything that defines *where and how* the
+stacks are sampled — per-stack resolution, slice thickness, FOV drop decision,
+keep fraction, dropped end and oblique tilt. Passing the same plan to several
+co-registered volumes gives them matching stacks:
+
+```python
+from mri_synth.fov.resampling import compute_shared_support_mask
+
+t1, t2 = load_t1(), load_t2()          # (1, C, D, H, W), same grid
+
+# One FOV prescription for the session (only needed when tight_fov=True)
+support = compute_shared_support_mask([t1[0], t2[0]]).unsqueeze(0)
+
+plan = generator.sample_structural_plan(batch_size=1, support_masks=support)
+
+lr_t1, hr_t1, _, masks_t1 = generator.generate_paired_data(t1, structural_plan=plan)
+lr_t2, hr_t2, _, masks_t2 = generator.generate_paired_data(t2, structural_plan=plan)
+# stack i of each contrast shares orientation, thickness, coverage and tilt;
+# the FOV masks are identical
+```
+
+Omit `structural_plan` to sample a fresh geometry inline, as before.
+
 ### Balanced orientation combos
 
 When `balanced_orientation_combos=True`, the dataset cycles through orientation dropout patterns (drop one orientation at a time, plus all-present) evenly across the epoch. Use `set_epoch()` to reshuffle each epoch:
@@ -243,8 +323,8 @@ For distributed training, call `set_epoch(epoch)` on each rank to keep schedules
 | `prob` | `0.7` | Probability of FOV cropping per stack |
 | `min_keep` | `0.40` | Minimum fraction of slices to keep |
 | `max_keep` | `0.70` | Maximum fraction of slices to keep |
-| `ensure_coverage` | `true` | Ensure complementary FOV coverage across stacks |
-| `force_both_sides` | `true` | Drop slices from both ends |
+| `ensure_coverage` | `true` | Guarantee the **union** of the stacks contains the whole head (see below) |
+| `force_both_sides` | `true` | Drop slices from both ends, so the kept slab stays centred. Set `false` to drop from one end, which offsets the slab |
 | `obliqueness_range` | `15.0` | Max rotation per axis in degrees |
 | `enable_obliqueness` | `true` | Enable oblique acquisition simulation |
 | `prob_obliqueness` | `0.5` | Probability of applying obliqueness per stack |
@@ -310,10 +390,77 @@ The pipeline applies the following steps to each HR volume:
    - PSF blurring with configurable slice profile (boxcar/gaussian/trapezoid)
    - K-space artifact injection (motion ghosting, RF spikes, aliasing)
    - FFT-based downsampling via k-space cropping
+   - Additive Rician noise, at native LR resolution
    - FOV slice drop on native LR (optional, simulates incomplete coverage)
    - Affine-based resampling to HR grid with obliqueness simulation
    - FOV mask generation via the "dummy mask trick"
-   - Additive Rician noise
+
+Noise is added at native LR resolution, before the FOV drop and the resample —
+that is the scale the scanner acquires it at. Adding it at the end instead
+would make it white at HR resolution rather than correlated at the LR voxel
+scale, fill regions the FOV mask reports as never acquired, and leave the
+native-resolution stacks (`--save-native-res`) noise-free while their upsampled
+counterparts were noisy. Slices removed by the FOV drop stay exactly zero,
+since they were never acquired.
+
+Steps 5–7 run for every stack, including those whose sampled resolution needs no
+downsampling — the FOV drop and obliqueness are prescribed independently of
+resolution, so skipping them there would contradict the recorded metadata.
+
+### Union coverage (`fov.ensure_coverage`)
+
+Individual stacks are meant to miss parts of the head — that is what the FOV
+mask is for. What must not happen is a head voxel that **no** stack observed:
+the HR target would then contain anatomy absent from every input, and a
+reconstruction gets scored on tissue it had no way to see.
+
+With `ensure_coverage: true`, the union of the stacks is guaranteed to contain
+the whole head:
+
+1. Each stack's observed region is predicted analytically from the sampled
+   geometry — resolution, kept slab, and obliqueness — before any volume is
+   simulated. The prediction and the simulation share one geometry resolver
+   (`resolve_stack_geometry`), so they cannot disagree.
+2. Coverage is measured against the actual foreground (conservatively
+   max-pooled), not a bounding box, so the guarantee tracks the head's real
+   shape.
+3. If head is unseen, the keep fraction of whichever stack recovers the most
+   unseen tissue per step is grown, repeating until the union closes. Cropping
+   is relaxed only where it genuinely loses anatomy.
+
+Three *centred* slabs usually already cover an ellipsoidal head between them —
+the region they jointly miss is the eight corners of the FOV, which is air — so
+the repair typically does nothing. It bites mainly with `force_both_sides:
+false`, where one-sided slabs can jointly miss a whole corner of the head.
+
+If the head still cannot be covered with cropping fully relaxed, a warning is
+raised: at that point the loss is obliqueness rotating anatomy out of the LR
+grid, not slice dropping, and the fix is a smaller `obliqueness_range` or a
+padded volume.
+
+### Grid alignment (why LR and HR stay registered)
+
+Reconstruction methods that fit a continuous volume to the stacks (INRs,
+super-resolution) assume the LR stacks and the HR ground truth share a
+coordinate system. Two conventions make that true, and both are load-bearing:
+
+1. **Centred sampling grid.** Plain k-space cropping samples the band-limited HR
+   signal at HR coordinates `j·f` (`f = N/m`), which corner-aligns the LR grid to
+   the HR grid and leaves it `f−1` voxels short at the far edge. The downsampler
+   applies a half-sample phase ramp so the LR samples land on the centred
+   positions `(j − (m−1)/2)·f + (N−1)/2` instead, matching the centre-aligned
+   affine and leaving an equal margin at each end.
+2. **Effective, not nominal, spacing.** The crop rounds to a whole number of
+   samples: a requested 4.7 mm over 128 slices gives 27 slices, i.e. 4.741 mm.
+   The affine must encode `hr_spacing · N/m`; encoding the requested 4.7 mm
+   progressively stretches the stack against the HR grid. `build_lr_affine`
+   warns if the spacing it is handed disagrees with the LR/HR shapes.
+
+Likewise the slice-profile PSF kernel is sampled on symmetric integer offsets
+with unit spacing, so it blurs without translating.
+
+`tests/test_geometry.py` asserts these end to end: a phantom's centroid must
+agree between HR and every LR stack to well under a voxel.
 
 ### FOV Mask and Obliqueness
 

@@ -36,13 +36,24 @@ def apply_kspace_motion_ghosting(
 
 
 def apply_kspace_spike(
-    volume: torch.Tensor, intensity: float = 5.0
+    volume: torch.Tensor, intensity: float = 0.04
 ) -> torch.Tensor:
     """
     Simulate RF spikes (zipper artifacts).
 
     Stray RF interference appears as a high-intensity spike at a specific
     point in k-space, producing periodic stripes when reconstructed.
+
+    Args:
+        volume: Input volume (C, D, H, W).
+        intensity: Spike amplitude as a fraction of peak k-space magnitude.
+            Defaults to ``ArtifactConfig.spike_intensity`` so calling this
+            directly matches what the pipeline does. It previously defaulted to
+            ``5.0`` — 125x the configured value, enough to swamp the anatomy
+            rather than overlay stripes on it.
+
+    Returns:
+        Volume with a k-space spike applied (same shape).
     """
     k_space = torch.fft.fftn(volume, dim=(1, 2, 3))
     C, D, H, W = volume.shape
@@ -60,14 +71,40 @@ def apply_aliasing(
     """
     Simulate wrap-around aliasing (fold-over artifacts).
 
-    When the FOV is smaller than the anatomy in the phase encoding direction,
-    signal from outside the FOV wraps around to the opposite side.
+    When the FOV is smaller than the anatomy along the phase encoding
+    direction, signal from beyond one edge re-enters at the opposite edge.
+    Only those wrap bands gain signal; the interior of the image is untouched,
+    and anatomy that sits comfortably inside the FOV produces no fold-over at
+    all — as in a real acquisition with an adequate FOV.
+
+    BUG FIX: this used to roll the *whole* volume and blend it as
+    ``(volume + 0.5 * roll(+s) + 0.5 * roll(-s)) / 1.5``. Those weights sum to
+    2 but were divided by 1.5, so every voxel — including regions no wrapped
+    signal reaches — was scaled by 4/3. Enabling aliasing brightened the image
+    by 33% and pushed values past 1.0, which ``clip_to_unit_range`` then
+    saturated. It also attenuated nothing and displaced everything, which reads
+    as a triple exposure rather than fold-over.
+
+    Args:
+        volume: Input volume (C, D, H, W).
+        axis: Spatial axis (0, 1, 2) acting as the phase encoding direction.
+        fold_pct: Fraction of the extent that lies outside the FOV, split
+            between the two ends.
+
+    Returns:
+        Volume with wrapped signal added at both ends (same shape).
     """
     spatial_axis = axis + 1
-    original_size = volume.shape[spatial_axis]
-    shift = int(original_size * fold_pct / 2)
-    wrapped = (
-        torch.roll(volume, shifts=shift, dims=spatial_axis) * 0.5
-        + torch.roll(volume, shifts=-shift, dims=spatial_axis) * 0.5
-    )
-    return (volume + wrapped) / 1.5
+    n = volume.shape[spatial_axis]
+    band = min(int(n * fold_pct / 2), n // 2)
+
+    out = volume.clone()
+    if band <= 0:
+        return out
+
+    head = volume.narrow(spatial_axis, 0, band)
+    tail = volume.narrow(spatial_axis, n - band, band)
+    # Anatomy past the near edge reappears at the far edge, and vice versa.
+    out.narrow(spatial_axis, n - band, band).add_(head)
+    out.narrow(spatial_axis, 0, band).add_(tail)
+    return out

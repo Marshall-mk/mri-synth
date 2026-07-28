@@ -56,8 +56,10 @@ fov:
   prob: 1.0                          # Probability of FOV cropping per stack
   min_keep: 0.40                     # Minimum fraction of through-plane slices to keep
   max_keep: 0.70                     # Maximum fraction of through-plane slices to keep
-  ensure_coverage: false              # Ensure complementary FOV coverage across stacks
-  force_both_sides: true             # Drop slices from both ends (not just one)
+  ensure_coverage: true              # Guarantee the UNION of the stacks contains the whole head
+                                     #   (grows slabs only where cropping would lose anatomy)
+  force_both_sides: true             # Drop from both ends, keeping the slab centred;
+                                     #   false drops from one end, offsetting the slab
   obliqueness_range: 15.0            # Max obliqueness rotation per axis in degrees
   enable_obliqueness: true           # Simulate oblique acquisitions (tilted stacks)
   prob_obliqueness: 1.0              # Probability of applying obliqueness per stack

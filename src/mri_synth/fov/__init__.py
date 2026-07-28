@@ -5,6 +5,7 @@ from mri_synth.fov.resampling import (
     apply_fov_slice_drop_native,
     build_lr_affine,
     compute_brain_bbox_support_mask,
+    compute_shared_support_mask,
     euler_to_rotation_matrix,
     resample_with_fov_mask,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "apply_fov_slice_drop_native",
     "build_lr_affine",
     "compute_brain_bbox_support_mask",
+    "compute_shared_support_mask",
     "euler_to_rotation_matrix",
     "resample_with_fov_mask",
 ]

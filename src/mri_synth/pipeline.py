@@ -168,12 +168,18 @@ class HRLRDataGenerator:
                     f"drop_orientations must contain indices in [0, {self.num_stacks})"
                 )
 
-        # Resolution config (replaces SampleResolution nn.Module — Bug Fix #2)
-        if randomise_res:
-            self.res_config = ResolutionConfig(
-                min_resolution=min_resolution,
-                max_res_aniso=max_res_aniso,
-            )
+        # Resolution config (replaces SampleResolution nn.Module — Bug Fix #2).
+        #
+        # BUG FIX: this was built only when randomise_res=True, so with
+        # randomise_res=False _create_orthogonal_resolutions fell through to
+        # hardcoded [1,1,1]/[9,9,9] defaults and silently ignored the
+        # configured range — i.e. exactly in the deterministic mode you would
+        # use for controlled experiments, asking for fixed 3 mm slices got you
+        # fixed 9 mm ones. The range is needed in both modes.
+        self.res_config = ResolutionConfig(
+            min_resolution=min_resolution,
+            max_res_aniso=max_res_aniso,
+        )
 
         # Bias field. prob=1.0 because gating is done per-patient in
         # generate_paired_data via self.prob_bias_field.
@@ -261,8 +267,17 @@ class HRLRDataGenerator:
         )
 
     def _normalize_image(self, image: torch.Tensor) -> torch.Tensor:
-        """Normalize image to [0, 1] using percentile scaling."""
-        return self.normalizer(image)
+        """Normalize image to [0, 1] using percentile scaling.
+
+        Percentiles are computed per batch item. ``ScaleIntensityRangePercentiles``
+        is a single-sample transform, so handing it the whole (B, C, D, H, W)
+        batch would pool intensities across subjects and make each volume's
+        normalization depend on the others it happened to be batched with.
+        """
+        return torch.cat(
+            [self.normalizer(image[b : b + 1]) for b in range(image.shape[0])],
+            dim=0,
+        )
 
     def _create_orientation_mask(
         self, batch_size: int, device: torch.device
@@ -321,11 +336,12 @@ class HRLRDataGenerator:
                 should_drop = torch.rand(1).item() < self.fov_augmentation_prob
                 batch_drops.append(should_drop)
 
-            # Coverage guarantee: if all stacks would be dropped, keep one
-            if self.fov_ensure_coverage and all(batch_drops):
-                keep_idx = torch.randint(0, self.num_stacks, (1,)).item()
-                batch_drops[keep_idx] = False
-
+            # No coverage handling here: forcing one stack to stay uncropped
+            # (the old approach) both over-corrects — three centred slabs
+            # usually already cover the head between them — and under-corrects,
+            # since it never checks the head at all. The real guarantee lives in
+            # HRLRDataGenerator._enforce_union_coverage, which measures coverage
+            # against the actual anatomy.
             for s in range(self.num_stacks):
                 drop_decisions[s][b] = batch_drops[s]
                 if batch_drops[s]:
@@ -356,12 +372,8 @@ class HRLRDataGenerator:
             Tuple of (resolutions_list, thickness_list), each containing
             num_stacks tensors of shape (batch_size, 3).
         """
-        if hasattr(self, "res_config"):
-            min_res = torch.tensor(self.res_config.min_resolution, device=device)
-            max_res = torch.tensor(self.res_config.max_res_aniso, device=device)
-        else:
-            min_res = torch.tensor([1.0, 1.0, 1.0], device=device)
-            max_res = torch.tensor([9.0, 9.0, 9.0], device=device)
+        min_res = torch.tensor(self.res_config.min_resolution, device=device)
+        max_res = torch.tensor(self.res_config.max_res_aniso, device=device)
 
         high_res_value = min_res.min().item()
 
@@ -423,11 +435,143 @@ class HRLRDataGenerator:
 
         return resolutions, thicknesses
 
+    def sample_structural_plan(
+        self,
+        batch_size: int = 1,
+        device: Optional[torch.device] = None,
+        support_masks: Optional[torch.Tensor] = None,
+    ) -> Dict:
+        """Sample one acquisition geometry, reusable across several volumes.
+
+        Everything that defines *where and how* the stacks are sampled —
+        per-stack resolution and slice thickness, FOV slice-drop decision, keep
+        fraction and dropped end, and obliqueness tilt — is drawn once and
+        returned as a plain dict. Feeding the same plan to
+        :meth:`generate_paired_data` for several co-registered volumes (the T1,
+        T2 and FLAIR of one subject) makes their stack ``i`` share one
+        acquisition: same orientation, same thickness, same coverage, same tilt.
+
+        Appearance corruptions (bias field, noise, gamma) are deliberately *not*
+        part of the plan — real repeat acquisitions share a prescription, not a
+        noise realisation. In ``structural_only`` mode none of them apply anyway.
+
+        Args:
+            batch_size: Number of volumes per call to ``generate_paired_data``.
+            device: Device for the sampled tensors.
+            support_masks: Optional (B, 1, D, H, W) tight-FOV support masks to
+                pin into the plan. Without this each volume derives its own
+                brain bbox from its own intensities, which differs between
+                contrasts and desynchronises their FOV masks. See
+                :func:`mri_synth.fov.resampling.compute_shared_support_mask`.
+
+        Returns:
+            Dict accepted by ``generate_paired_data(structural_plan=...)``.
+        """
+        device = device or torch.device("cpu")
+        resolutions, thicknesses = self._create_orthogonal_resolutions(
+            batch_size, device
+        )
+        fov_drop, fov_keep = self._compute_fov_drop_decisions(batch_size, device)
+
+        drop_from_start = []
+        obliqueness = []
+        for _ in range(self.num_stacks):
+            drop_from_start.append(
+                torch.rand(batch_size, device=device) < 0.5
+            )
+            obliqueness.append(
+                [
+                    self.artifact_simulator.sample_obliqueness(device)
+                    for _ in range(batch_size)
+                ]
+            )
+
+        return {
+            "resolutions": resolutions,
+            "thicknesses": thicknesses,
+            "fov_drop": fov_drop,
+            "fov_keep_fraction": fov_keep,
+            "fov_drop_from_start": drop_from_start,
+            "obliqueness": obliqueness,
+            "support_masks": support_masks,
+        }
+
+    def _enforce_union_coverage(
+        self, plan: Dict, hr_images: torch.Tensor
+    ) -> None:
+        """Widen FOV slabs until the stacks jointly observe the whole head.
+
+        ``fov.ensure_coverage`` promises that the *union* of the stacks contains
+        the subject's entire head. Individual stacks may still miss most of it;
+        what must not happen is a head voxel that no stack observed, since the
+        HR target would then contain anatomy absent from every input.
+
+        Predicts each stack's observed region from the sampled geometry and
+        grows the keep fraction of whichever stack recovers the most unseen head
+        per step, so cropping is relaxed only where it actually loses anatomy.
+        The plan is updated in place, so contrasts sharing a plan stay matched.
+        """
+        if not self.fov_ensure_coverage or self.fov_augmentation_prob <= 0:
+            return
+
+        from mri_synth.fov.coverage import coarse_foreground, ensure_union_coverage
+
+        sim = self.artifact_simulator
+        hr_shape = tuple(hr_images.shape[2:])
+        hr_spacing = [float(v) for v in sim.volume_res.tolist()]
+        shared_support = plan.get("support_masks")
+
+        for b in range(hr_images.shape[0]):
+            # With a shared prescription (multi-contrast), judge coverage
+            # against that one head definition so every contrast repairs
+            # identically instead of drifting on its own intensities.
+            source = (
+                shared_support[b]
+                if shared_support is not None
+                else hr_images[b]
+            )
+            threshold = 0.5 if shared_support is not None else sim.tight_fov_threshold
+            foreground, stride = coarse_foreground(source, threshold=threshold)
+
+            geometries, keeps, flags, starts = [], [], [], []
+            for s in range(self.num_stacks):
+                dropped = bool(plan["fov_drop"][s][b].item())
+                geometries.append(
+                    sim.resolve_stack_geometry(
+                        hr_shape,
+                        plan["resolutions"][s][b],
+                        plan["obliqueness"][s][b],
+                    )
+                )
+                flags.append(dropped)
+                keeps.append(
+                    float(plan["fov_keep_fraction"][s][b].item()) if dropped else 1.0
+                )
+                starts.append(bool(plan["fov_drop_from_start"][s][b].item()))
+
+            new_keeps, new_flags, _ = ensure_union_coverage(
+                foreground=foreground,
+                stride=stride,
+                geometries=geometries,
+                keep_fractions=keeps,
+                drop_flags=flags,
+                drop_from_start=starts,
+                force_both_sides=self.fov_force_both_sides,
+                hr_shape=hr_shape,
+                hr_spacing=hr_spacing,
+                device=hr_images.device,
+            )
+
+            for s in range(self.num_stacks):
+                plan["fov_keep_fraction"][s][b] = new_keeps[s]
+                plan["fov_drop"][s][b] = new_flags[s]
+
     def generate_paired_data(
         self,
         hr_images: torch.Tensor,
         return_resolution: bool = False,
         sample_info: Optional[Dict] = None,
+        structural_plan: Optional[Dict] = None,
     ):
         """
         Generate paired LR-HR training data with N orthogonal LR stacks.
@@ -436,6 +580,10 @@ class HRLRDataGenerator:
             hr_images: High-resolution input images (B, C, D, H, W) in RAS.
             return_resolution: If True, also return resolution and thickness.
             sample_info: Optional metadata dict.
+            structural_plan: Optional acquisition geometry from
+                :meth:`sample_structural_plan`. Pass the same plan for several
+                co-registered volumes to give them identical stack geometry.
+                When omitted, a fresh geometry is sampled inline.
 
         Returns:
             Variable-length tuple depending on return_resolution and
@@ -448,10 +596,19 @@ class HRLRDataGenerator:
         # STEP 1: Normalize HR
         hr_augmented = self._normalize_image(hr_images)
 
-        # STEP 2: Create N orthogonal LR stacks
-        resolutions, thicknesses = self._create_orthogonal_resolutions(
-            batch_size, device
-        )
+        # STEP 2: Resolve the acquisition geometry. A caller-supplied plan pins
+        # it so co-registered volumes (contrasts of one subject) come out with
+        # matching stacks; otherwise a fresh one is drawn here.
+        if structural_plan is None:
+            structural_plan = self.sample_structural_plan(batch_size, device)
+
+        # Grow FOV slabs where the sampled cropping would leave head unseen by
+        # every stack. Mutates the plan in place, so contrasts sharing a plan
+        # inherit the same repaired geometry.
+        self._enforce_union_coverage(structural_plan, hr_augmented)
+
+        resolutions = structural_plan["resolutions"]
+        thicknesses = structural_plan["thicknesses"]
 
         # STEP 3: Pre-sample artifact decisions (once per patient)
         apply_bias_field = torch.rand(batch_size, device=device) < self.prob_bias_field
@@ -487,10 +644,8 @@ class HRLRDataGenerator:
             for b in range(batch_size):
                 hr_degraded[b : b + 1] = self.intensity_aug(hr_degraded[b : b + 1])
 
-        # Pre-compute FOV drop decisions with coverage guarantees
-        fov_drop_decisions, fov_keep_fractions = self._compute_fov_drop_decisions(
-            batch_size, device
-        )
+        fov_drop_decisions = structural_plan["fov_drop"]
+        fov_keep_fractions = structural_plan["fov_keep_fraction"]
 
         # Record the sampled decisions so callers (e.g. the CLI) can log which
         # corruptions were actually applied. Per-patient flags are shared
@@ -507,11 +662,18 @@ class HRLRDataGenerator:
             "fov_drop": fov_drop_decisions,
             "fov_keep_fraction": fov_keep_fractions,
         }
+        self._last_structural_plan = structural_plan
 
         lr_stacks = []
         true_lr_stacks = []
         fov_masks = []
         self._rotation_angles_per_stack = []
+        # Per-stack, per-batch-item LR-voxel -> HR-voxel 4x4 matrices. Callers
+        # that save native-resolution stacks need these to place them in world
+        # space; deriving the affine from the requested resolution alone is not
+        # enough (the k-space crop rounds the spacing, and the stack is
+        # corner-aligned to the HR grid and may be rotated).
+        self._lr_to_hr_voxel_per_stack = []
 
         for stack_idx in range(self.num_stacks):
             lr_images = hr_degraded.clone()
@@ -533,6 +695,9 @@ class HRLRDataGenerator:
                 fov_drop_decisions=fov_drop_decisions[stack_idx],
                 fov_keep_fractions=fov_keep_fractions[stack_idx],
                 fov_force_both_sides=self.fov_force_both_sides,
+                fov_drop_from_start=structural_plan["fov_drop_from_start"][stack_idx],
+                obliqueness_angles=structural_plan["obliqueness"][stack_idx],
+                support_masks=structural_plan.get("support_masks"),
             )
             if self.return_intermediate:
                 lr_images, stack_fov_masks, true_lr_images = sim_out
@@ -541,6 +706,9 @@ class HRLRDataGenerator:
 
             self._rotation_angles_per_stack.append(
                 self.artifact_simulator._last_rotation_angles
+            )
+            self._lr_to_hr_voxel_per_stack.append(
+                self.artifact_simulator._last_lr_to_hr_voxel_matrices
             )
 
             # Normalize LR to [0, 1] — match HR's simple clamp

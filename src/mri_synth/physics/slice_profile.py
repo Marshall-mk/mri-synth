@@ -49,8 +49,21 @@ class SliceProfilePhysics(nn.Module):
         if kernel_size % 2 == 0:
             kernel_size += 1
 
-        grid = torch.linspace(
-            -kernel_size // 2, kernel_size // 2, kernel_size, device=device
+        # Tap offsets in voxels: symmetric integers centred on 0, spacing
+        # exactly 1 voxel — the same convention conv1d assumes when we pad by
+        # kernel_size // 2.
+        #
+        # BUG FIX: was `torch.linspace(-kernel_size // 2, kernel_size // 2,
+        # kernel_size)`. Python parses `-kernel_size // 2` as
+        # `(-kernel_size) // 2`, which floors to -(kernel_size + 1) / 2 for odd
+        # sizes, so the grid ran e.g. [-5, 4] over 9 taps instead of [-4, 4].
+        # That made the kernel (a) off-centre by half a tap, shifting the volume
+        # ~0.5 voxel along the through-plane axis relative to the HR ground
+        # truth, and (b) spaced kernel_size / (kernel_size - 1) voxels apart,
+        # so the simulated slice was ~1/kernel_size too thin.
+        grid = (
+            torch.arange(kernel_size, device=device, dtype=torch.float32)
+            - kernel_size // 2
         )
         # Normalize grid relative to slice thickness (0.5 = half thickness)
         x = grid / scale
