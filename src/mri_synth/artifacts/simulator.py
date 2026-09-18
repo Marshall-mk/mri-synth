@@ -12,6 +12,7 @@ from mri_synth.fov.resampling import (
     apply_fov_slice_drop_native,
     build_lr_affine,
     compute_brain_bbox_support_mask,
+    kept_slice_bounds,
     resample_with_fov_mask,
 )
 from mri_synth.physics.slice_profile import SliceProfilePhysics
@@ -340,9 +341,15 @@ class MRIArtifactSimulator(nn.Module):
 
         # STEP 5: FOV slice drop on native LR (image + support share the
         # same drop pattern so the FOV mask reflects the drop).
+        n_native_slices = img.shape[downsample_axis + 1]
+        self._last_kept_slab = (downsample_axis, 0, n_native_slices)
         if fov_drop_applied:
             if drop_from_start is None and not fov_force_both_sides:
                 drop_from_start = bool(torch.rand(1).item() < 0.5)
+            _lo, _hi = kept_slice_bounds(
+                n_native_slices, keep_frac, fov_force_both_sides, drop_from_start
+            )
+            self._last_kept_slab = (downsample_axis, _lo, _hi)
             img = apply_fov_slice_drop_native(
                 img,
                 through_plane_axis=downsample_axis,
@@ -484,6 +491,10 @@ class MRIArtifactSimulator(nn.Module):
         # Per-batch-item LR-voxel -> HR-voxel matrices (4x4), for callers that
         # need to place the native-resolution stacks in world space.
         self._last_lr_to_hr_voxel_matrices = []
+        # (axis, lo, hi) of the slices actually acquired, per batch item. Needed so a
+        # native stack can be written CROPPED rather than zero-filled; without it a
+        # consumer cannot distinguish unacquired slices from measured background.
+        self._last_kept_slabs = []
 
         for b in range(batch_size):
             img = image[b]  # (C, D, H, W)
@@ -597,6 +608,7 @@ class MRIArtifactSimulator(nn.Module):
             )
             self._last_rotation_angles.append(rotation_angles)
             self._last_lr_to_hr_voxel_matrices.append(self._last_lr_to_hr_voxel)
+            self._last_kept_slabs.append(self._last_kept_slab)
             if self.return_intermediate:
                 true_lr_outputs.append(true_lr_native.clone().unsqueeze(0))
             fov_mask_outputs.append(fov_mask.unsqueeze(0))

@@ -511,6 +511,9 @@ class HRLRDataGenerator:
         per step, so cropping is relaxed only where it actually loses anatomy.
         The plan is updated in place, so contrasts sharing a plan stay matched.
         """
+        # Per-batch-item fraction of head observed by NO stack after repair. 0.0 means
+        # the guarantee held; >0 means it could not be met at this obliqueness.
+        self._coverage_uncovered = {b: 0.0 for b in range(hr_images.shape[0])}
         if not self.fov_ensure_coverage or self.fov_augmentation_prob <= 0:
             return
 
@@ -530,8 +533,20 @@ class HRLRDataGenerator:
                 if shared_support is not None
                 else hr_images[b]
             )
-            threshold = 0.5 if shared_support is not None else sim.tight_fov_threshold
-            foreground, stride = coarse_foreground(source, threshold=threshold)
+            if shared_support is not None:
+                # A prescribed support mask is already binary, so 0.5 is exact and a
+                # relative cutoff would add nothing. It is a BBOX around the head, so
+                # it legitimately occupies far more of the volume than the head does --
+                # widen the sanity band for this path only.
+                foreground, stride = coarse_foreground(
+                    source, threshold=0.5, relative=False,
+                    sanity_range=(0.05, 0.95),
+                )
+            else:
+                # Raw intensities: scale the cutoff by this volume's own range.
+                foreground, stride = coarse_foreground(
+                    source, threshold=sim.tight_fov_threshold, relative=True,
+                )
 
             geometries, keeps, flags, starts = [], [], [], []
             for s in range(self.num_stacks):
@@ -549,7 +564,7 @@ class HRLRDataGenerator:
                 )
                 starts.append(bool(plan["fov_drop_from_start"][s][b].item()))
 
-            new_keeps, new_flags, _ = ensure_union_coverage(
+            new_keeps, new_flags, uncovered = ensure_union_coverage(
                 foreground=foreground,
                 stride=stride,
                 geometries=geometries,
@@ -561,6 +576,12 @@ class HRLRDataGenerator:
                 hr_spacing=hr_spacing,
                 device=hr_images.device,
             )
+
+            # Keep the achieved coverage. ensure_union_coverage only WARNS when the
+            # head cannot be covered, so without recording this the dataset ships with
+            # anatomy no stack observed and nothing on disk says so -- a reconstruction
+            # is then scored on invented structure.
+            self._coverage_uncovered[b] = float(uncovered)
 
             for s in range(self.num_stacks):
                 plan["fov_keep_fraction"][s][b] = new_keeps[s]
@@ -674,6 +695,9 @@ class HRLRDataGenerator:
         # enough (the k-space crop rounds the spacing, and the stack is
         # corner-aligned to the HR grid and may be rotated).
         self._lr_to_hr_voxel_per_stack = []
+        # Per-stack (axis, lo, hi) of the acquired slices, so the CLI can write the
+        # native stack cropped instead of zero-filled.
+        self._kept_slab_per_stack = []
 
         for stack_idx in range(self.num_stacks):
             lr_images = hr_degraded.clone()
@@ -706,6 +730,9 @@ class HRLRDataGenerator:
 
             self._rotation_angles_per_stack.append(
                 self.artifact_simulator._last_rotation_angles
+            )
+            self._kept_slab_per_stack.append(
+                list(self.artifact_simulator._last_kept_slabs)
             )
             self._lr_to_hr_voxel_per_stack.append(
                 self.artifact_simulator._last_lr_to_hr_voxel_matrices

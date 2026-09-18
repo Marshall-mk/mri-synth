@@ -3,6 +3,8 @@
 from mri_synth.fov.resampling import (
     affine_resample_3d,
     apply_fov_slice_drop_native,
+    crop_native_to_kept_slab,
+    shift_affine_origin,
     build_lr_affine,
     compute_brain_bbox_support_mask,
     compute_shared_support_mask,
@@ -13,6 +15,8 @@ from mri_synth.fov.resampling import (
 __all__ = [
     "affine_resample_3d",
     "apply_fov_slice_drop_native",
+    "crop_native_to_kept_slab",
+    "shift_affine_origin",
     "build_lr_affine",
     "compute_brain_bbox_support_mask",
     "compute_shared_support_mask",

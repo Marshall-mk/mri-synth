@@ -57,23 +57,76 @@ class StackGeometry:
 
 
 def coarse_foreground(
-    image: torch.Tensor, threshold: float = 1e-3, stride: int = 4
+    image: torch.Tensor,
+    threshold: float = 1e-3,
+    stride: int = 4,
+    relative: bool = True,
+    percentile: float = 99.5,
+    sanity_range: Tuple[float, float] = (0.05, 0.60),
 ) -> Tuple[torch.Tensor, int]:
     """Downsample a foreground mask conservatively.
 
     Uses max-pooling, so a coarse cell is foreground if *any* voxel inside it
     is — coverage is then never claimed for a cell that contains unseen head.
 
+    THRESHOLDING IS RELATIVE BY DEFAULT. An absolute cutoff only means anything
+    if every volume occupies the same intensity range, and the failure when it
+    does not is silent and asymmetric: a dim subject yields a mask smaller than
+    its head, the coverage guarantee is then satisfied against that smaller
+    head, and stacks are cropped past anatomy that the threshold excluded; a
+    bright subject yields a mask that swells into noise, and the repair loop
+    grows keep fractions to cover background, destroying the FOV variation the
+    augmentation exists to create. Scaling the cutoff by a high percentile of
+    the volume's own intensities makes it track each volume's scale.
+
     Args:
         image: (C, D, H, W) volume.
-        threshold: Intensity above which a voxel counts as head.
+        threshold: Absolute cutoff, used when ``relative`` is False.
         stride: Coarse cell size in voxels.
+        relative: Interpret ``threshold`` as a FRACTION of the volume's own
+            ``percentile`` level rather than an absolute intensity. On data already
+            normalised so that percentile is ~1.0 this is identical to the absolute
+            behaviour, which is why the default cutoff is unchanged; on data at any
+            other scale it tracks the volume instead of silently mis-masking it.
+        percentile: Percentile of positive voxels used as the reference level.
+        sanity_range: Accepted (min, max) fraction of the volume that may be
+            foreground. Outside it the threshold is wrong for this volume and a
+            warning is raised — see below.
 
     Returns:
         ``(mask, stride)`` where mask is a bool tensor of shape
         ``ceil(spatial / stride)``.
     """
-    fg = (image > threshold).any(dim=0, keepdim=True).float().unsqueeze(0)
+    cut = threshold
+    if relative:
+        pos = image[image > 0]
+        if pos.numel() > 0:
+            flat = pos.flatten().float()
+            # torch.quantile caps at 2**24 elements; subsample above that.
+            if flat.numel() > 2 ** 24:
+                idx = torch.randperm(flat.numel(), device=flat.device)[: 2 ** 24]
+                flat = flat[idx]
+            ref = float(torch.quantile(flat, percentile / 100.0))
+            if ref > 0:
+                cut = max(threshold * ref, torch.finfo(torch.float32).tiny)
+    fg_full = (image > cut).any(dim=0, keepdim=True)
+
+    # Safety net: a head is a sizeable but not dominant fraction of the volume. A
+    # mask at 0.1% or 95% means the cutoff is wrong for THIS volume, and nothing
+    # downstream would notice -- the coverage guarantee would simply be computed
+    # against the wrong anatomy.
+    frac = float(fg_full.float().mean())
+    lo, hi = sanity_range
+    if not (lo <= frac <= hi):
+        warnings.warn(
+            f"fov.coarse_foreground: foreground is {frac:.1%} of the volume, outside "
+            f"the expected {lo:.0%}-{hi:.0%}. Cutoff {cut:.4g} "
+            f"({'relative' if relative else 'absolute'}) is probably wrong for this "
+            f"volume; the coverage guarantee will be computed against the wrong head.",
+            stacklevel=2,
+        )
+
+    fg = fg_full.float().unsqueeze(0)
     if stride > 1:
         fg = torch.nn.functional.max_pool3d(
             fg, kernel_size=stride, stride=stride, ceil_mode=True

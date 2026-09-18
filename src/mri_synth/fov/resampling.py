@@ -324,7 +324,10 @@ def kept_slice_bounds(
     Returns:
         ``(lo, hi)`` half-open range of kept slice indices.
     """
-    n_keep = max(1, int(n_slices * keep_fraction))
+    # round, not truncate: int() floors, so the realised fraction was always <= the
+    # sampled one (23 slices at 0.567 kept 13 = 0.565) and the recorded
+    # fov_keep_fraction systematically overstated what was actually kept.
+    n_keep = max(1, min(n_slices, int(round(n_slices * keep_fraction))))
     n_drop = n_slices - n_keep
     if n_drop <= 0:
         return 0, n_slices
@@ -334,6 +337,57 @@ def kept_slice_bounds(
     if drop_from_start:
         return n_drop, n_slices
     return 0, n_keep
+
+
+def crop_native_to_kept_slab(
+    volume: torch.Tensor,
+    through_plane_axis: int,
+    keep_fraction: float,
+    force_both_sides: bool = True,
+    drop_from_start: Optional[bool] = None,
+) -> Tuple[torch.Tensor, int]:
+    """Physically remove the dropped slices from a native LR volume.
+
+    :func:`apply_fov_slice_drop_native` ZEROES the dropped slices rather than
+    removing them, which is correct for the HR path: the zeros are resampled to
+    the HR grid and the FOV mask is derived from them. It is wrong for a native
+    stack written to disk as an acquisition. A scanner that images a shorter
+    slab produces *fewer slices*, not slices of zeros, and a consumer has no way
+    to tell fabricated zeros from measured background — it will treat them as
+    data and be trained to reproduce them.
+
+    Returns ``(cropped, lo)``; ``lo`` is the index of the first kept slice, which
+    the caller must use to shift the affine origin so the cropped stack still
+    lands in the same world position.
+    """
+    axis = through_plane_axis + 1                      # (C, D, H, W)
+    n_slices = volume.shape[axis]
+    lo, hi = kept_slice_bounds(
+        n_slices, keep_fraction, force_both_sides, drop_from_start
+    )
+    if lo == 0 and hi == n_slices:
+        return volume, 0
+    slices = [slice(None)] * volume.ndim
+    slices[axis] = slice(lo, hi)
+    return volume[tuple(slices)].contiguous(), lo
+
+
+def shift_affine_origin(affine, through_plane_axis: int, lo: int):
+    """Move an affine's origin forward by ``lo`` voxels along one axis.
+
+    Cropping the first ``lo`` slices moves the array's first voxel; without this
+    the cropped stack is written at the wrong world position and no longer
+    overlaps the other stacks correctly.
+    """
+    if lo == 0:
+        return affine
+    import numpy as np
+
+    out = np.array(affine, dtype=float).copy()
+    offset = np.zeros(3)
+    offset[through_plane_axis] = lo
+    out[:3, 3] = out[:3, 3] + out[:3, :3] @ offset
+    return out
 
 
 def compute_brain_bbox_support_mask(

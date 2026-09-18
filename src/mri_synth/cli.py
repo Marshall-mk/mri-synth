@@ -81,6 +81,21 @@ def _applied_artifacts_meta(decisions: dict) -> dict:
     }
 
 
+def _coverage_meta(generator) -> dict:
+    """Fraction of head observed by NO stack, after the coverage repair.
+
+    0.0 means the union-coverage guarantee held. A non-zero value means the head
+    could not be covered at this obliqueness even with cropping fully relaxed --
+    the ground truth then contains anatomy no input saw, and a reconstruction is
+    being scored on invented structure. Recorded so a consumer can filter such
+    subjects instead of discovering it from a warning that scrolled past.
+    """
+    unc = getattr(generator, "_coverage_uncovered", None)
+    if not unc:
+        return {}
+    return {"uncovered_head_fraction": round(float(unc.get(0, 0.0)), 6)}
+
+
 def _save_stacks(
     out_dir: Path,
     generator,
@@ -98,6 +113,10 @@ def _save_stacks(
     """
     import math
 
+    from mri_synth.fov.resampling import (
+        crop_native_to_kept_slab,
+        shift_affine_origin,
+    )
     from mri_synth.io import (
         get_fov_mask_filename,
         get_native_stack_filename,
@@ -146,11 +165,33 @@ def _save_stacks(
             lr_to_hr = (
                 generator._lr_to_hr_voxel_per_stack[s_idx][0].detach().cpu().numpy()
             )
-            save_volume(
-                true_lr_stacks[s_idx].squeeze(0),
-                out_dir / native_file,
-                affine @ lr_to_hr,
-            )
+            native_affine = affine @ lr_to_hr
+            native_vol = true_lr_stacks[s_idx].squeeze(0)
+
+            # CROP the unacquired slices out instead of shipping them as zeros.
+            # apply_fov_slice_drop_native zeroes them, which the HR path needs (the
+            # FOV mask is derived from those zeros), but a native stack on disk is an
+            # ACQUISITION: a shorter slab means fewer slices, not slices of zeros. A
+            # consumer cannot tell fabricated zeros from measured background and will
+            # fit them as data. Measured downstream: reconstruction intensity came out
+            # at the fraction of stacks covering each voxel (1/3, 2/3, 3/3) and the
+            # brain-masked score was 15-17 dB low.
+            axis, lo, hi = generator._kept_slab_per_stack[s_idx][0]
+            if (lo, hi) != (0, native_vol.shape[axis + 1]):
+                sl = [slice(None)] * native_vol.ndim
+                sl[axis + 1] = slice(lo, hi)
+                native_vol = native_vol[tuple(sl)].contiguous()
+                native_affine = shift_affine_origin(native_affine, axis, lo)
+            # What was ACTUALLY kept. fov_keep_fraction is the requested (post-repair)
+            # value; kept_slice_bounds rounds it to whole slices, so the two differ by
+            # up to half a slice. Consumers should trust these fields, not the fraction.
+            n_native = int(true_lr_stacks[s_idx].squeeze(0).shape[axis + 1])
+            stack_meta["native_kept_slices"] = [int(lo), int(hi)]
+            stack_meta["native_total_slices"] = n_native
+            stack_meta["native_through_plane_axis"] = int(axis)
+            stack_meta["fov_keep_fraction_realised"] = round((hi - lo) / n_native, 4)
+
+            save_volume(native_vol, out_dir / native_file, native_affine)
             stack_meta["native_file"] = native_file
 
         stack_metas.append(stack_meta)
@@ -265,6 +306,7 @@ def _generate_multi_contrast(input_path, output_dir, cfg, generator, manifest, t
                     "applied_artifacts": _applied_artifacts_meta(
                         generator._last_decisions
                     ),
+                    **_coverage_meta(generator),
                     "stacks": _save_stacks(
                         contrast_dir, generator, cfg, lr_stacks, fov_masks,
                         true_lr_stacks, resolutions, thicknesses, affine,
@@ -410,6 +452,7 @@ def generate(
                 "applied_artifacts": _applied_artifacts_meta(
                     generator._last_decisions
                 ),
+                **_coverage_meta(generator),
                 "stacks": _save_stacks(
                     var_dir, generator, cfg, lr_stacks, fov_masks,
                     true_lr_stacks if generator.return_intermediate else None,
