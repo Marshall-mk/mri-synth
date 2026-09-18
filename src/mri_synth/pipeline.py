@@ -168,14 +168,8 @@ class HRLRDataGenerator:
                     f"drop_orientations must contain indices in [0, {self.num_stacks})"
                 )
 
-        # Resolution config (replaces SampleResolution nn.Module — Bug Fix #2).
-        #
-        # BUG FIX: this was built only when randomise_res=True, so with
-        # randomise_res=False _create_orthogonal_resolutions fell through to
-        # hardcoded [1,1,1]/[9,9,9] defaults and silently ignored the
-        # configured range — i.e. exactly in the deterministic mode you would
-        # use for controlled experiments, asking for fixed 3 mm slices got you
-        # fixed 9 mm ones. The range is needed in both modes.
+        # Resolution range, consumed by _create_orthogonal_resolutions in both
+        # the randomised and the deterministic mode.
         self.res_config = ResolutionConfig(
             min_resolution=min_resolution,
             max_res_aniso=max_res_aniso,
@@ -650,7 +644,6 @@ class HRLRDataGenerator:
             < self.artifact_simulator.prob_noise
         )
 
-        # BUG FIX: was randint(1, 3) — now includes axis 0
         motion_axis = torch.randint(0, 3, (batch_size,), device=device)
         aliasing_axis = torch.randint(0, 3, (batch_size,), device=device)
 

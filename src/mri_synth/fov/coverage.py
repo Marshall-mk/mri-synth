@@ -111,8 +111,8 @@ def coarse_foreground(
                 cut = max(threshold * ref, torch.finfo(torch.float32).tiny)
     fg_full = (image > cut).any(dim=0, keepdim=True)
 
-    # Safety net: a head is a sizeable but not dominant fraction of the volume. A
-    # mask at 0.1% or 95% means the cutoff is wrong for THIS volume, and nothing
+    # A head is a sizeable but not dominant fraction of the volume. A mask at
+    # 0.1% or 95% means the cutoff is wrong for this volume, and nothing
     # downstream would notice -- the coverage guarantee would simply be computed
     # against the wrong anatomy.
     frac = float(fg_full.float().mean())

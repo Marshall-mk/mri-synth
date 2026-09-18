@@ -172,10 +172,8 @@ def _save_stacks(
             # apply_fov_slice_drop_native zeroes them, which the HR path needs (the
             # FOV mask is derived from those zeros), but a native stack on disk is an
             # ACQUISITION: a shorter slab means fewer slices, not slices of zeros. A
-            # consumer cannot tell fabricated zeros from measured background and will
-            # fit them as data. Measured downstream: reconstruction intensity came out
-            # at the fraction of stacks covering each voxel (1/3, 2/3, 3/3) and the
-            # brain-masked score was 15-17 dB low.
+            # consumer cannot tell fabricated zeros from measured background and
+            # will fit them as data.
             axis, lo, hi = generator._kept_slab_per_stack[s_idx][0]
             if (lo, hi) != (0, native_vol.shape[axis + 1]):
                 sl = [slice(None)] * native_vol.ndim

@@ -48,9 +48,7 @@ def apply_kspace_spike(
         volume: Input volume (C, D, H, W).
         intensity: Spike amplitude as a fraction of peak k-space magnitude.
             Defaults to ``ArtifactConfig.spike_intensity`` so calling this
-            directly matches what the pipeline does. It previously defaulted to
-            ``5.0`` — 125x the configured value, enough to swamp the anatomy
-            rather than overlay stripes on it.
+            directly matches what the pipeline does.
 
     Returns:
         Volume with a k-space spike applied (same shape).
@@ -76,14 +74,6 @@ def apply_aliasing(
     Only those wrap bands gain signal; the interior of the image is untouched,
     and anatomy that sits comfortably inside the FOV produces no fold-over at
     all — as in a real acquisition with an adequate FOV.
-
-    BUG FIX: this used to roll the *whole* volume and blend it as
-    ``(volume + 0.5 * roll(+s) + 0.5 * roll(-s)) / 1.5``. Those weights sum to
-    2 but were divided by 1.5, so every voxel — including regions no wrapped
-    signal reaches — was scaled by 4/3. Enabling aliasing brightened the image
-    by 33% and pushed values past 1.0, which ``clip_to_unit_range`` then
-    saturated. It also attenuated nothing and displaced everything, which reads
-    as a triple exposure rather than fold-over.
 
     Args:
         volume: Input volume (C, D, H, W).

@@ -137,7 +137,6 @@ class MRIArtifactSimulator(nn.Module):
             if motion_axis is not None:
                 axis = motion_axis[b].item()
             else:
-                # Bug fix history: previously randint(1, 3) skipped axis 0.
                 axis = torch.randint(0, 3, (1,)).item()
             img = apply_kspace_motion_ghosting(
                 img, axis=axis, intensity=self.motion_intensity
@@ -322,13 +321,10 @@ class MRIArtifactSimulator(nn.Module):
 
         # Mirror the HR brain bbox support into axis-aligned LR space.
         #
-        # BUG FIX: with tight_fov=False this used to stay None, leaving
-        # resample_with_fov_mask to build its all-ones dummy *after* the slice
-        # drop below had already run. The drop therefore never reached the
-        # mask: the image had zeroed slabs while the mask declared every voxel
-        # valid, so a masked loss would read a dropped slab as genuine zero
-        # signal. Materialise the all-ones support here instead, so it goes
-        # through the same drop and rotation the image does.
+        # The all-ones support is materialised here rather than left to
+        # resample_with_fov_mask, so that it goes through the same slice drop
+        # and rotation the image does. A mask built afterwards would declare
+        # the dropped slabs valid while the image had them zeroed.
         if hr_support is not None:
             lr_support = affine_resample_3d(
                 hr_support, hr_affine, lr_affine_aligned,
@@ -567,27 +563,15 @@ class MRIArtifactSimulator(nn.Module):
             keep_frac = fov_keep_fractions[b].item() if fov_drop_applied else 0.0
 
             # STEP 5: Thermal (Rician) noise, at the resolution the scanner
-            # actually acquires at.
-            #
-            # BUG FIX: this used to be the final step, applied to the volume
-            # after it had been resampled onto the HR grid. That put white
-            # noise at HR resolution rather than noise correlated at the LR
-            # voxel scale, painted noise over regions the FOV mask declares
-            # missing (no out-of-FOV voxel was even exactly zero), and left the
-            # native-resolution stacks from return_intermediate noise-free
-            # while their upsampled counterparts were noisy.
-            #
-            # It also has to land *before* the FOV slice drop below, so slices
-            # that were never acquired stay exactly zero instead of picking up
-            # a noise floor.
+            # actually acquires at, so it is correlated at the LR voxel scale.
+            # It lands before the FOV slice drop below so slices that were
+            # never acquired stay exactly zero.
             img = self._apply_noise(img, b, enable_noise)
 
             # STEPS 6-7: native FOV slice drop, obliqueness, resample to HR.
             # Run unconditionally: when no downsampling was needed the LR grid
             # simply equals the HR grid, but the FOV slice drop, obliqueness
-            # and tight-FOV support must still be honoured. Skipping them here
-            # (as an earlier `else` branch did) silently dropped the requested
-            # FOV simulation while the metadata still reported it as applied.
+            # and tight-FOV support must still be honoured.
             img, fov_mask, true_lr_native, rotation_angles = (
                 self._resample_lr_to_hr(
                     img, hr_support, downsample_axis, target_shape,

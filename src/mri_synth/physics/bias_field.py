@@ -23,11 +23,17 @@ class BiasFieldCorruption(nn.Module):
         bias_field_std: float = 0.3,
         bias_scale: float = 0.025,
         prob: float = 0.98,
+        min_control_points: int = 4,
     ):
         super().__init__()
         self.bias_field_std = bias_field_std
         self.bias_scale = bias_scale
         self.prob = prob
+        # A bias field needs at least a couple of control points per axis to vary
+        # spatially. At bias_scale 0.025 any axis under 40 voxels rounds to a single
+        # coefficient, which Resize broadcasts into a constant -- a global intensity
+        # scale rather than inhomogeneity.
+        self.min_control_points = max(2, int(min_control_points))
 
     def forward(self, image: torch.Tensor) -> torch.Tensor:
         """
@@ -50,7 +56,12 @@ class BiasFieldCorruption(nn.Module):
         for b in range(batch_size):
             img = image[b : b + 1]
 
-            bias_shape = [max(1, int(s * self.bias_scale)) for s in spatial_shape]
+            bias_shape = [
+                max(self.min_control_points, int(round(s * self.bias_scale)))
+                for s in spatial_shape
+            ]
+            # Never ask for more control points than there are voxels.
+            bias_shape = [min(c, int(s)) for c, s in zip(bias_shape, spatial_shape)]
             bias_coeffs = (
                 torch.randn(1, 1, *bias_shape, device=device) * self.bias_field_std
             )

@@ -222,7 +222,7 @@ class TestMRIArtifactSimulator:
         assert 0.8 < ratio < 1.2
 
     def test_motion_axis_includes_zero(self):
-        """Bug fix: motion axis should include axis 0."""
+        """Motion axis should include axis 0."""
         sim = MRIArtifactSimulator(
             volume_res=[1.0, 1.0, 1.0],
             target_res=[1.0, 1.0, 1.0],

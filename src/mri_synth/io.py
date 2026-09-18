@@ -76,6 +76,21 @@ def resample_to_spacing(
         col_norm = np.sqrt((affine[:3, i] ** 2).sum())
         new_affine[:3, i] = affine[:3, i] * (target_spacing[i] / col_norm)
 
+    # Move the origin to the new first-voxel CENTRE. interpolate(align_corners=False)
+    # preserves the field of view, i.e. the outer edges of the volume, not the centres
+    # of the corner voxels. The first voxel centre therefore sits half a voxel in from
+    # the edge in both grids, and those half-voxels differ once the spacing changes:
+    #
+    #     edge = origin_old - 0.5 * old_spacing      (same physical edge in both)
+    #     origin_new = edge + 0.5 * new_spacing
+    #
+    # Leaving the origin untouched writes the resampled volume off by
+    # (old_spacing - new_spacing) / 2 per axis. Sub-voxel, but it propagates into every
+    # stack affine derived from this grid.
+    old_dir = affine[:3, :3] / current_spacing          # unit direction per axis
+    half_shift = 0.5 * (np.asarray(target_spacing, float) - np.asarray(current_spacing, float))
+    new_affine[:3, 3] = affine[:3, 3] + old_dir @ half_shift
+
     return resampled, new_affine
 
 

@@ -27,6 +27,18 @@ class SliceProfilePhysics(nn.Module):
 
     def __init__(self, profile_type: str = "trapezoid", edge_width: float = 0.1):
         super().__init__()
+        # profile_type is deliberately NOT validated here: the established contract is
+        # that an unknown profile raises from get_slice_kernel at use, not at
+        # construction (tests/test_slice_profile.py::test_unknown_profile_raises).
+        # The docstring advertises 0.0-0.5, but the trapezoid divides by edge_width and
+        # sets flat_width = 0.5 - edge_width, so 0.0 is a division by zero and anything
+        # above 0.5 gives a negative flat region. Reject both rather than emit a kernel
+        # full of inf/nan that only shows up as a corrupted volume much later.
+        if profile_type == "trapezoid" and not (0.0 < edge_width <= 0.5):
+            raise ValueError(
+                f"edge_width must be in (0.0, 0.5] for the trapezoid profile, got "
+                f"{edge_width}. Use profile_type='boxcar' for a zero-width transition."
+            )
         self.profile_type = profile_type
         self.edge_width = edge_width
 
@@ -52,15 +64,6 @@ class SliceProfilePhysics(nn.Module):
         # Tap offsets in voxels: symmetric integers centred on 0, spacing
         # exactly 1 voxel — the same convention conv1d assumes when we pad by
         # kernel_size // 2.
-        #
-        # BUG FIX: was `torch.linspace(-kernel_size // 2, kernel_size // 2,
-        # kernel_size)`. Python parses `-kernel_size // 2` as
-        # `(-kernel_size) // 2`, which floors to -(kernel_size + 1) / 2 for odd
-        # sizes, so the grid ran e.g. [-5, 4] over 9 taps instead of [-4, 4].
-        # That made the kernel (a) off-centre by half a tap, shifting the volume
-        # ~0.5 voxel along the through-plane axis relative to the HR ground
-        # truth, and (b) spaced kernel_size / (kernel_size - 1) voxels apart,
-        # so the simulated slice was ~1/kernel_size too thin.
         grid = (
             torch.arange(kernel_size, device=device, dtype=torch.float32)
             - kernel_size // 2
@@ -108,7 +111,6 @@ class SliceProfilePhysics(nn.Module):
             thickness: Target slice thickness [thick_D, thick_H, thick_W].
         """
         device = img.device
-        channels = img.shape[0]
 
         factors = thickness / resolution
         slice_dim_idx = torch.argmax(factors).item()
@@ -120,7 +122,6 @@ class SliceProfilePhysics(nn.Module):
                     thickness[i], resolution[i], device
                 )
             # In-plane: fixed Gaussian PSF width (~0.42 pixels)
-            # BUG FIX: was `0.42 * (resolution[i] / resolution[i])` — self-division
             else:
                 sigma = 0.42
                 k_size = 5
@@ -128,8 +129,10 @@ class SliceProfilePhysics(nn.Module):
                 kernel = torch.exp(-0.5 * (k_grid / sigma) ** 2)
                 kernel = kernel / kernel.sum()
 
-            # Reshape kernel for conv1d: (C, 1, K)
-            kernel = kernel.view(1, 1, -1).repeat(channels, 1, 1)
+            # (1, 1, K). The volume is flattened to (N, 1, L) below, so every
+            # channel goes through the same single-channel filter and no
+            # per-channel copy of the kernel is needed.
+            kernel = kernel.view(1, 1, -1)
             padding = kernel.shape[-1] // 2
 
             # Permute to put active axis last
@@ -144,7 +147,7 @@ class SliceProfilePhysics(nn.Module):
             shape_before = img_in.shape
             img_flat = img_in.reshape(-1, 1, shape_before[-1])
 
-            img_filtered = F.conv1d(img_flat, kernel[0:1], padding=padding)
+            img_filtered = F.conv1d(img_flat, kernel, padding=padding)
 
             img_out = img_filtered.view(shape_before)
 
