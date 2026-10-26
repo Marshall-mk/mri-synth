@@ -235,3 +235,60 @@ class TestMRIArtifactSimulator:
             torch.manual_seed(_)
             vol = torch.rand(1, 1, 8, 8, 8)
             sim(vol, torch.tensor([[1.0, 1.0, 1.0]]))
+
+
+class TestObliqueStackFrame:
+    """Oblique stacks are simulated in their own (rotated) frame."""
+
+    ANGLES = (0.15, -0.1, 0.2)
+
+    def _simulator(self):
+        return MRIArtifactSimulator(
+            volume_res=[1.0, 1.0, 1.0], target_res=[1.0, 1.0, 1.0],
+            return_intermediate=True, enable_obliqueness=True,
+            prob_obliqueness=1.0, prob_motion=0.0, prob_spike=0.0,
+            prob_aliasing=0.0, prob_noise=0.0, tight_fov=False,
+        )
+
+    @staticmethod
+    def _smooth_volume(shape=(48, 48, 48)):
+        torch.manual_seed(0)
+        vol = torch.rand(1, 1, *shape)
+        kernel = torch.ones(1, 1, 5, 5, 5) / 125.0
+        for _ in range(3):
+            vol = torch.nn.functional.conv3d(vol, kernel, padding=2)
+        return (vol - vol.min()) / (vol.max() - vol.min())
+
+    def test_lr_affine_matches_rotated_stack_affine(self):
+        """The stack's affine is the rotated affine build_lr_affine gives directly."""
+        from mri_synth.fov.resampling import build_lr_affine
+
+        sim = self._simulator()
+        vol = self._smooth_volume()
+        _, _, true_lr = sim(vol, torch.tensor([[1.0, 1.0, 4.0]]),
+                            obliqueness_angles=[self.ANGLES])
+        lr_shape = tuple(true_lr.shape[2:])
+        expected = build_lr_affine(
+            hr_affine=torch.eye(4), through_plane_axis=2,
+            lr_spacing_tp=48 / lr_shape[2], hr_spacing_tp=1.0,
+            lr_shape=lr_shape, hr_shape=(48, 48, 48), rotation_angles=self.ANGLES,
+        )
+        assert torch.allclose(sim._last_lr_to_hr_voxel_matrices[0], expected, atol=1e-4)
+
+    def test_oblique_stack_is_registered_to_hr(self):
+        """No integer shift along any axis aligns the upsampled oblique stack better."""
+        sim = self._simulator()
+        vol = self._smooth_volume()
+        out, fov, _ = sim(vol, torch.tensor([[1.0, 1.0, 4.0]]),
+                          obliqueness_angles=[self.ANGLES])
+        valid = (fov[0, 0] < 0.5) & (vol[0, 0] > 0)
+
+        def ncc(a, b):
+            a, b = a[valid] - a[valid].mean(), b[valid] - b[valid].mean()
+            return float((a * b).sum() / ((a * a).sum() * (b * b).sum()).sqrt())
+
+        at_zero = ncc(out[0, 0], vol[0, 0])
+        for axis in range(3):
+            for shift in (-2, -1, 1, 2):
+                shifted = torch.roll(vol[0, 0], shift, dims=axis)
+                assert ncc(out[0, 0], shifted) < at_zero, (axis, shift)

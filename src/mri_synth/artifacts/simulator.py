@@ -284,33 +284,32 @@ class MRIArtifactSimulator(nn.Module):
         fov_force_both_sides: bool,
         device: torch.device,
         drop_from_start: Optional[bool] = None,
-        rotation_angles: Optional[Tuple[float, float, float]] = None,
-        use_given_rotation: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[Tuple[float, float, float]]]:
-        """STEPS 5-6: native FOV slice drop, obliqueness, affine resample to HR.
+        frame_affine: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """STEPS 6-7: native FOV slice drop, affine resample to HR.
 
+        ``img`` was simulated in the stack's own frame, ``frame_affine`` (the
+        HR grid, rotated for an oblique stack; see :meth:`_to_stack_frame`), so
+        its affine is that frame's, with the through-plane column scaled.
         ``lr_spacing_tp`` is the *effective* through-plane spacing realised by
         the k-space crop (``hr_spacing * hr_slices / lr_slices``), not the
         nominal acquisition resolution — see :func:`build_lr_affine`.
 
-        Returns ``(img_hr, fov_mask, true_lr_native, rotation_angles)``. The
-        ``true_lr_native`` tensor is whatever the scanner is conceptually
-        emitting at native LR resolution — the oblique-LR volume when a
-        rotation was sampled, otherwise the axis-aligned LR.
+        Returns ``(img_hr, fov_mask, true_lr_native)``, the last being the
+        stack at native LR resolution in its own (possibly oblique) frame.
         """
-        vol_res = self.volume_res.to(device)
-        hr_affine = torch.diag(
-            torch.tensor(
-                [vol_res[0], vol_res[1], vol_res[2], 1.0], device=device
-            )
-        )
+        hr_affine = self._hr_affine(device)
+        if frame_affine is None:
+            frame_affine = hr_affine
+        oblique = not torch.equal(frame_affine, hr_affine)
         lr_native_shape = tuple(img.shape[1:])
         resample_mode = (
             self.upsample_mode if self.upsample_mode != "trilinear" else "bilinear"
         )
+        vol_res = self.volume_res.to(device)
 
-        lr_affine_aligned = build_lr_affine(
-            hr_affine=hr_affine,
+        lr_affine = build_lr_affine(
+            hr_affine=frame_affine,
             through_plane_axis=downsample_axis,
             lr_spacing_tp=lr_spacing_tp,
             hr_spacing_tp=vol_res[downsample_axis].item(),
@@ -319,15 +318,21 @@ class MRIArtifactSimulator(nn.Module):
             rotation_angles=None,
         )
 
-        # Mirror the HR brain bbox support into axis-aligned LR space.
+        # Mirror the HR brain bbox support into the LR stack's grid.
         #
         # The all-ones support is materialised here rather than left to
         # resample_with_fov_mask, so that it goes through the same slice drop
-        # and rotation the image does. A mask built afterwards would declare
-        # the dropped slabs valid while the image had them zeroed.
+        # the image does. A mask built afterwards would declare the dropped
+        # slabs valid while the image had them zeroed. For an oblique stack an
+        # all-ones HR support is resampled too, which marks the parts of the
+        # rotated grid that fall outside the HR volume.
+        if hr_support is None and oblique:
+            hr_support = torch.ones(
+                1, *self._hr_shape, device=device, dtype=img.dtype
+            )
         if hr_support is not None:
             lr_support = affine_resample_3d(
-                hr_support, hr_affine, lr_affine_aligned,
+                hr_support, hr_affine, lr_affine,
                 lr_native_shape, mode="nearest",
             )
         else:
@@ -362,51 +367,60 @@ class MRIArtifactSimulator(nn.Module):
                     drop_from_start=drop_from_start,
                 )
 
-        # Reuse a caller-supplied tilt when several volumes must share one
-        # acquisition geometry; otherwise sample a fresh one.
-        if not use_given_rotation:
-            rotation_angles = self.sample_obliqueness(device)
-
-        if rotation_angles is None:
-            # Axis-aligned: image and support already in axis-aligned LR.
-            img_hr, fov_mask = resample_with_fov_mask(
-                img, lr_affine_aligned, hr_affine,
-                target_shape, mode=resample_mode,
-                support_mask=lr_support,
-            )
-            # Voxel-to-voxel map from the native LR grid to the HR grid, so
-            # callers can write a native-resolution NIfTI that lands in the
-            # right place in world space.
-            self._last_lr_to_hr_voxel = torch.linalg.inv(hr_affine) @ lr_affine_aligned
-            return img_hr, fov_mask, img, None
-
-        # Oblique branch: build the tilted affine and rotate both image and
-        # support into oblique LR space before the final HR resample.
-        lr_affine_oblique = build_lr_affine(
-            hr_affine=hr_affine,
-            through_plane_axis=downsample_axis,
-            lr_spacing_tp=lr_spacing_tp,
-            hr_spacing_tp=vol_res[downsample_axis].item(),
-            lr_shape=lr_native_shape,
-            hr_shape=target_shape,
-            rotation_angles=rotation_angles,
-        )
-        oblique_lr = affine_resample_3d(
-            img, lr_affine_aligned, lr_affine_oblique,
-            lr_native_shape, mode=resample_mode,
-        )
-        if lr_support is not None:
-            lr_support = affine_resample_3d(
-                lr_support, lr_affine_aligned, lr_affine_oblique,
-                lr_native_shape, mode="nearest",
-            )
         img_hr, fov_mask = resample_with_fov_mask(
-            oblique_lr, lr_affine_oblique, hr_affine,
+            img, lr_affine, hr_affine,
             target_shape, mode=resample_mode,
             support_mask=lr_support,
         )
-        self._last_lr_to_hr_voxel = torch.linalg.inv(hr_affine) @ lr_affine_oblique
-        return img_hr, fov_mask, oblique_lr, rotation_angles
+        # Voxel-to-voxel map from the native LR grid to the HR grid, so callers
+        # can write a native-resolution NIfTI that lands in the right place in
+        # world space.
+        self._last_lr_to_hr_voxel = torch.linalg.inv(hr_affine) @ lr_affine
+        return img_hr, fov_mask, img
+
+    def _hr_affine(self, device: torch.device) -> torch.Tensor:
+        vol_res = self.volume_res.to(device)
+        return torch.diag(
+            torch.tensor([vol_res[0], vol_res[1], vol_res[2], 1.0], device=device)
+        )
+
+    def _to_stack_frame(
+        self,
+        img: torch.Tensor,
+        rotation_angles: Optional[Tuple[float, float, float]],
+        device: torch.device,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """STEP 0: resample the HR volume into an oblique stack's own frame.
+
+        An oblique acquisition excites and samples slices along its own
+        (tilted) slice normal. Simulating it by degrading along the HR axes and
+        then interpolating the thick stack onto a rotated grid puts the slice
+        profile along the wrong direction and interpolates the LR data a second
+        time. Instead the HR volume is resampled once, at HR resolution, onto
+        the rotated grid (same shape, rotated about the volume centre), and the
+        slice profile, k-space artifacts and down-sampling then act along that
+        grid's axes. The stack's final affine (``build_lr_affine`` on this
+        frame) is identical to the rotated affine used before, so coverage
+        prediction and written geometry are unchanged.
+
+        Returns ``(img_in_frame, frame_affine)``; for ``rotation_angles=None``
+        the volume and the HR affine are returned unchanged.
+        """
+        hr_affine = self._hr_affine(device)
+        if rotation_angles is None:
+            return img, hr_affine
+        shape = tuple(img.shape[1:])
+        spacing = float(self.volume_res[0])
+        frame_affine = build_lr_affine(
+            hr_affine=hr_affine, through_plane_axis=0,
+            lr_spacing_tp=spacing, hr_spacing_tp=spacing,
+            lr_shape=shape, hr_shape=shape, rotation_angles=rotation_angles,
+        )
+        resample_mode = (
+            self.upsample_mode if self.upsample_mode != "trilinear" else "bilinear"
+        )
+        img = affine_resample_3d(img, hr_affine, frame_affine, shape, mode=resample_mode)
+        return img, frame_affine
 
     def _apply_noise(
         self, img: torch.Tensor, b: int, enable_noise: Optional[torch.Tensor]
@@ -517,6 +531,17 @@ class MRIArtifactSimulator(nn.Module):
             else:
                 thk = acq_res
 
+            # STEP 0: obliqueness. Reuse a caller-supplied tilt when several
+            # volumes must share one acquisition geometry; otherwise sample one.
+            # It is resolved before any degradation because an oblique stack is
+            # simulated in its own frame (see _to_stack_frame).
+            if obliqueness_angles is not None:
+                rotation_angles = obliqueness_angles[b]
+            else:
+                rotation_angles = self.sample_obliqueness(device)
+            self._hr_shape = tuple(original_input_shape)
+            img, frame_affine = self._to_stack_frame(img, rotation_angles, device)
+
             # STEP 1: PSF blurring
             img = self.physics_engine(
                 img, resolution=self.volume_res.to(device), thickness=thk,
@@ -568,11 +593,11 @@ class MRIArtifactSimulator(nn.Module):
             # never acquired stay exactly zero.
             img = self._apply_noise(img, b, enable_noise)
 
-            # STEPS 6-7: native FOV slice drop, obliqueness, resample to HR.
-            # Run unconditionally: when no downsampling was needed the LR grid
-            # simply equals the HR grid, but the FOV slice drop, obliqueness
+            # STEPS 6-7: native FOV slice drop, resample to HR. Run
+            # unconditionally: when no downsampling was needed the LR grid
+            # simply equals the stack frame, but the FOV slice drop, obliqueness
             # and tight-FOV support must still be honoured.
-            img, fov_mask, true_lr_native, rotation_angles = (
+            img, fov_mask, true_lr_native = (
                 self._resample_lr_to_hr(
                     img, hr_support, downsample_axis, target_shape,
                     lr_spacing_tp, fov_drop_applied, keep_frac,
@@ -582,12 +607,7 @@ class MRIArtifactSimulator(nn.Module):
                         if fov_drop_from_start is not None
                         else None
                     ),
-                    rotation_angles=(
-                        obliqueness_angles[b]
-                        if obliqueness_angles is not None
-                        else None
-                    ),
-                    use_given_rotation=obliqueness_angles is not None,
+                    frame_affine=frame_affine,
                 )
             )
             self._last_rotation_angles.append(rotation_angles)
